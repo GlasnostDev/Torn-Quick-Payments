@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FFScouter - Profile Payment Pre-fill
 // @namespace    https://ffscouter.com/
-// @version      1.1
+// @version      1.2
 // @description  Pre-fills the "Give some money" form on Torn profile pages when FFScouter payment URL params are present (paymentamount, paymentref). Does NOT auto-send.
 // @author       FFScouter
 // @match        https://www.torn.com/profiles.php*
@@ -13,16 +13,16 @@
   'use strict';
 
   // ── 1. Parse query params ─────────────────────────────────────────────────
-  const params   = new URLSearchParams(window.location.search);
-  const xid      = params.get('XID');
+  const params    = new URLSearchParams(window.location.search);
+  const xid       = params.get('XID');
   const rawAmount = params.get('paymentamount');
-  const rawRef   = params.get('paymentref');
+  const rawRef    = params.get('paymentref');
 
   // Only run when both payment params are present
   if (!rawAmount || !rawRef) return;
 
-  const amount  = rawAmount.trim();                    // e.g. "800000"
-  const message = decodeURIComponent(rawRef).trim();   // decoded ref + optional suffix
+  const amount  = rawAmount.trim();
+  const message = decodeURIComponent(rawRef).trim();
 
   // ── 2. Helper: set value on a React-controlled input ─────────────────────
   function setNativeValue(input, value) {
@@ -39,16 +39,20 @@
     const amountInput  = document.querySelector('.send-cash .input-money:not([type="hidden"])');
     const messageInput = document.querySelector('.send-cash .send-cash-message-input');
 
-    if (!amountInput || !messageInput) return false;   // form not open yet
+    if (!amountInput || !messageInput) return false;
 
     setNativeValue(amountInput,  amount);
     setNativeValue(messageInput, message);
 
-    // Briefly highlight the fields so the user notices the pre-fill
+    // Briefly flash a subtle border around the fields so the user notices the pre-fill
     [amountInput, messageInput].forEach(el => {
-      el.style.transition = 'background 0.4s';
-      el.style.background = '#ffffaa';
-      setTimeout(() => { el.style.background = ''; }, 1500);
+      el.style.transition = 'outline-color 0.15s ease-in-out';
+      el.style.outline = '2px solid rgba(180, 160, 60, 0.85)';
+      el.style.outlineOffset = '2px';
+      setTimeout(() => {
+        el.style.outline = '2px solid transparent';
+        setTimeout(() => { el.style.outline = ''; el.style.outlineOffset = ''; }, 300);
+      }, 1200);
     });
 
     return true;
@@ -59,7 +63,6 @@
     const btn = document.querySelector('.profile-button-sendMoney');
     if (!btn) return false;
 
-    // Only click if the form isn't already open
     if (!document.querySelector('.send-cash .input-money')) {
       btn.click();
     }
@@ -67,9 +70,8 @@
   }
 
   // ── 5. Wait for the profile Actions buttons to be rendered, then trigger ──
-  //  Torn is a React SPA; the buttons appear asynchronously after page load.
   let attempts = 0;
-  const MAX_ATTEMPTS = 60;   // 6 seconds max wait
+  const MAX_ATTEMPTS = 60;
 
   const poller = setInterval(() => {
     attempts++;
@@ -80,17 +82,14 @@
       return;
     }
 
-    // Step A: open the form
-    if (!openSendMoneyForm()) return;   // buttons not rendered yet, keep waiting
+    if (!openSendMoneyForm()) return;
 
-    // Step B: fill the form (give the DOM one tick after clicking)
     setTimeout(() => {
       const filled = fillForm();
       if (filled) {
         clearInterval(poller);
         console.info('[FFScouter] Payment form pre-filled — amount:', amount, '| ref:', message);
       }
-      // If fillForm returned false, the poller will retry on the next tick
     }, 120);
 
   }, 100);
