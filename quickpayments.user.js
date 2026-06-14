@@ -1,10 +1,13 @@
 // ==UserScript==
 // @name         FFScouter - Profile Payment Pre-fill
 // @namespace    https://ffscouter.com/
-// @version      1.3
+// @version      1.4
 // @description  Pre-fills the "Give some money" form on Torn profile pages when FFScouter payment URL params are present (paymentamount, paymentref). Does NOT auto-send.
-// @author       FFScouter
+// @author       FFScouter / Glasnost [1844049]
 // @match        https://www.torn.com/profiles.php*
+// @updateURL    https://raw.githubusercontent.com/GlasnostDev/Torn-Quick-Payments/main/quickpayments.user.js
+// @downloadURL  https://raw.githubusercontent.com/GlasnostDev/Torn-Quick-Payments/main/quickpayments.user.js
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
