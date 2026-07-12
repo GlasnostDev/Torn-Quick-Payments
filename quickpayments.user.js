@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FFScouter - Profile Payment Pre-fill & Mail Pre-fill
 // @namespace    https://ffscouter.com/
-// @version      2.0
+// @version      2.1
 // @description  Pre-fills profile send-money (paymentamount, paymentref) and messages.php compose (mailsubject, mailbody). Recipient from XID is left to Torn. Does NOT auto-send.
 // @author       FFScouter / Glasnost [1844049]
 // @match        https://www.torn.com/profiles.php*
@@ -18,7 +18,6 @@
   // Mail compose: Torn expects XID / mailsubject / mailbody in the hash fragment
   // (e.g. #/p=compose&XID=2598132&mailsubject=…&mailbody=…). URLSearchParams already
   // percent-decodes; do not call decodeURIComponent again (bare % in e.g. "72%" throws).
-
   function parseHashQueryParams() {
     const hash = (window.location.hash || '').replace(/^#/, '');
     const amp = hash.indexOf('&');
@@ -30,13 +29,13 @@
 
   const params     = new URLSearchParams(window.location.search);
   const mailParams = parseHashQueryParams();
+
   const rawAmount  = params.get('paymentamount');
   const rawRef     = params.get('paymentref');
   const rawSubject = mailParams.get('mailsubject') || params.get('mailsubject');
   const rawBody    = mailParams.get('mailbody') || params.get('mailbody');
 
   // ── 2. Helper: set value on a React-controlled <input> ───────────────────
-
   function setNativeInputValue(input, value) {
     const nativeSetter = Object.getOwnPropertyDescriptor(
       window.HTMLInputElement.prototype, 'value'
@@ -47,7 +46,6 @@
   }
 
   // ── 3. Helper: flash a subtle outline so the user notices the pre-fill ───
-
   function flashOutline(el) {
     el.style.transition    = 'outline-color 0.15s ease-in-out';
     el.style.outline       = '2px solid rgba(180, 160, 60, 0.85)';
@@ -59,7 +57,6 @@
   }
 
   // ── 4. Helper: detect whether a string contains HTML markup ──────────────
-
   function looksLikeHtml(str) {
     return /<[a-z][\s\S]*>/i.test(str);
   }
@@ -67,7 +64,6 @@
   // ── 5. Helper: normalise line breaks ─────────────────────────────────────
   // Handles real CRLF/CR/LF as well as literal backslash-n that an AI agent
   // may have written into the URL instead of encoding a real newline as %0A.
-
   function normaliseLineBreaks(str) {
     return str
       .replace(/\r\n/g, '\n')  // CRLF → LF
@@ -80,7 +76,6 @@
   // Must be called AFTER normaliseLineBreaks so \n are real newline characters.
   // Escapes & < > so they are never misread as markup, then wraps each line
   // in <p>. Blank lines become <p>&nbsp;</p> to preserve visible spacing.
-
   function plainTextToHtml(str) {
     const escaped = str
       .replace(/&/g, '&amp;')
@@ -92,24 +87,27 @@
       .join('');
   }
 
-
   // ══════════════════════════════════════════════════════════════════════════
   // BRANCH A — profiles.php: Payment pre-fill
   // ══════════════════════════════════════════════════════════════════════════
-
   if (window.location.pathname === '/profiles.php' && rawAmount && rawRef) {
 
     const amount    = rawAmount.trim();
     const message   = rawRef.trim();
     const requested = parseFloat(amount.replace(/[^0-9.]/g, ''));
 
+    // anonymous=1 in the query string pre-ticks the "Anonymous" checkbox
+    const wantAnonymous = params.get('anonymous') === '1';
+
     function checkCashAndWarn() {
       const moneyEl = document.getElementById('user-money');
-      if (!moneyEl) return;
+      if (!moneyEl) return false;
+
       const cashOnHand = parseFloat(moneyEl.dataset.money || '0');
-      if (isNaN(cashOnHand) || cashOnHand >= requested) return;
+      if (isNaN(cashOnHand) || cashOnHand >= requested) return false;
 
       const fmt = n => '$' + Math.floor(n).toLocaleString('en-US');
+
       const banner = document.createElement('div');
       banner.id = 'ffscouter-cash-warning';
       banner.style.cssText = [
@@ -130,16 +128,31 @@
       banner.addEventListener('click', () => banner.remove());
       setTimeout(() => { if (banner.parentNode) banner.remove(); }, 30000);
       document.body.appendChild(banner);
+
       console.warn('[FFScouter] Insufficient cash — requested:', requested, '| on hand:', cashOnHand);
+      return true;
+    }
+
+    // Ticks the Anonymous checkbox if requested via anonymous=1. Safe to call
+    // repeatedly — only clicks it if it isn't already checked.
+    function tickAnonymousIfNeeded() {
+      if (!wantAnonymous) return;
+      const anonymousCheckbox = document.querySelector('.send-cash input#anonymous');
+      if (anonymousCheckbox && !anonymousCheckbox.checked) {
+        anonymousCheckbox.click();
+        flashOutline(anonymousCheckbox);
+      }
     }
 
     function fillPaymentForm() {
       const amountInput  = document.querySelector('.send-cash .input-money:not([type="hidden"])');
       const messageInput = document.querySelector('.send-cash .send-cash-message-input');
       if (!amountInput || !messageInput) return false;
+
       setNativeInputValue(amountInput,  amount);
       setNativeInputValue(messageInput, message);
       [amountInput, messageInput].forEach(flashOutline);
+
       return true;
     }
 
@@ -157,32 +170,38 @@
         console.warn('[FFScouter] Could not find send-money button after 6 s');
         return;
       }
+
       if (!openSendMoneyForm()) return;
+
       setTimeout(() => {
+        tickAnonymousIfNeeded();
+
+        // If there isn't enough cash on hand, warn but do NOT fill in the
+        // amount/message fields — leave them blank to prevent accidents.
+        if (checkCashAndWarn()) {
+          clearInterval(poller);
+          return;
+        }
+
         if (fillPaymentForm()) {
           clearInterval(poller);
           console.info('[FFScouter] Payment form pre-filled — amount:', amount, '| ref:', message);
-          setTimeout(checkCashAndWarn, 300);
         }
       }, 120);
     }, 100);
   }
 
-
   // ══════════════════════════════════════════════════════════════════════════
   // BRANCH B — messages.php: Mail compose pre-fill
   // ══════════════════════════════════════════════════════════════════════════
-
   if (window.location.pathname === '/messages.php' && (rawSubject || rawBody)) {
 
     const subject = rawSubject ? rawSubject.trim() : null;
-
     const body = rawBody
       ? normaliseLineBreaks(rawBody.trim())
       : null;
 
     let attempts = 0;
-
     const poller = setInterval(() => {
       if (++attempts > 100) {
         clearInterval(poller);
@@ -204,7 +223,6 @@
       if (body && !editor) return; // TinyMCE not initialised yet
 
       // ── All ready — fill in the fields ──────────────────────────────────
-
       clearInterval(poller);
 
       // Subject: plain text input — accepts all special chars raw, no escaping needed
@@ -224,7 +242,6 @@
       }
 
       console.info('[FFScouter] Mail compose pre-filled — subject:', subject, '| body:', body);
-
     }, 100);
   }
 
