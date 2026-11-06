@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FFScouter - Profile Payment Pre-fill & Mail Pre-fill
 // @namespace    https://ffscouter.com/
-// @version      4.3
+// @version      4.4
 // @description  Pre-fills profile send-money (paymentamount, paymentref) and messages.php compose (mailsubject, mailbody). Added: FFScouter payment queue with a movable, resizable panel (two-step SEND by click or hotkey, delay between payments, VAULT shortfall button), item.php send pre-fill (e.g. Xanax), and a property ID / market price / happiness bar.
 // @author       FFScouter / Glasnost [1844049] & Solenya [4053619]
 // @match        https://www.torn.com/profiles.php*
@@ -11,6 +11,8 @@
 // @match        https://ffscouter.com/supportpanel/payment-provider*
 // @match        https://www.ffscouter.com/supportpanel/payment-provider*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
+// @updateURL    https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js
+// @downloadURL  https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
@@ -258,6 +260,57 @@
   const q    = new URLSearchParams(location.search);
   const path = location.pathname;
 
+  const VERSION    = '4.4';   // keep in sync with @version above
+  const UPDATE_URL = 'https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js';   // empty = update check off
+  const isPDA      = typeof window.flutter_inappwebview !== 'undefined' || /TornPDA/i.test(navigator.userAgent);
+
+  // ── update check: once every 6 h, shows a dismissible banner when UPDATE_URL has a newer @version ──
+  function updateCheck() {
+    if (!UPDATE_URL || /(^|\.)ffscouter\.com$/.test(location.hostname)) return;
+    const KEY_UPD = 'ffscouter_update_v1';
+    let st = {};
+    try { st = JSON.parse(localStorage.getItem(KEY_UPD)) || {}; } catch (e) {}
+    const newer = (a, b) => {
+      const x = a.split('.').map(Number), y = b.split('.').map(Number);
+      for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+      return false;
+    };
+    function banner(v) {
+      if (st.dismissed === v || document.getElementById('ffq-update')) return;
+      const b = document.createElement('div');
+      b.id = 'ffq-update';
+      b.style.cssText = 'position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:2147483647;display:flex;align-items:center;gap:10px;max-width:94vw;background:#1e3a5f;color:#e0f2fe;border:1px solid #3b82f6;border-radius:8px;padding:8px 10px;font:bold 13px Arial,sans-serif;box-shadow:0 4px 18px rgba(0,0,0,.55)';
+      const t = document.createElement('span');
+      t.textContent = 'FFScouter ' + v + ' is available (you have ' + VERSION + ')';
+      const a = document.createElement('a');
+      a.textContent = 'Update';
+      a.href = UPDATE_URL;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.style.cssText = 'background:#15803d;color:#fff;text-decoration:none;border-radius:6px;padding:6px 12px';
+      const x = document.createElement('span');
+      x.textContent = '✕';
+      x.style.cssText = 'cursor:pointer;padding:4px 6px;color:#9aa7b2';
+      x.onclick = () => { st.dismissed = v; try { localStorage.setItem(KEY_UPD, JSON.stringify(st)); } catch (e) {} b.remove(); };
+      b.append(t, a, x);
+      document.body.appendChild(b);
+    }
+    const found = text => {
+      const m = /@version\s+([\d.]+)/.exec(text || '');
+      if (m && newer(m[1], VERSION)) { st.latest = m[1]; banner(m[1]); } else st.latest = null;
+    };
+    if (st.latest && newer(st.latest, VERSION)) banner(st.latest);
+    if (Date.now() - (st.checked || 0) < 6 * 3600 * 1000) return;
+    st.checked = Date.now();
+    try { localStorage.setItem(KEY_UPD, JSON.stringify(st)); } catch (e) {}
+    const url = UPDATE_URL + (UPDATE_URL.includes('?') ? '&' : '?') + 't=' + Date.now();
+    const get = typeof window.PDA_httpGet === 'function'
+      ? window.PDA_httpGet(url).then(r => r.responseText)
+      : fetch(url, { cache: 'no-store' }).then(r => r.text());
+    get.then(found).then(() => { try { localStorage.setItem(KEY_UPD, JSON.stringify(st)); } catch (e) {} }).catch(() => {});
+  }
+  updateCheck();
+
   function setValue(el, v) {
     const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, v);
@@ -362,7 +415,8 @@
       document.body.appendChild(n);
       // keep clear of the panel: above it if there is room, otherwise below it
       const pr = document.getElementById('ffq-panel').getBoundingClientRect(), nh = n.offsetHeight + 12;
-      if (pr.top >= nh) n.style.bottom = (innerHeight - pr.top + 12) + 'px';
+      if (isPDA) n.style.bottom = '84px';   // docked panel scrolls with the page, so pin the note above PDA's bottom bar
+      else if (pr.top >= nh) n.style.bottom = (innerHeight - pr.top + 12) + 'px';
       else n.style.top = Math.min(innerHeight - nh, pr.bottom + 12) + 'px';
       setTimeout(() => n.remove(), 6000);
     }
@@ -479,14 +533,41 @@
     const vaultBtn = button('#ea580c', toVault);
     const nextBtn  = button('#00ADB5', () => onPage(S) ? next() : (location.href = urlFor(S, S.i)));
     const keyBtn   = button('#374151', chooseKey);
-    const isPDA    = typeof window.flutter_inappwebview !== 'undefined' || /TornPDA/i.test(navigator.userAgent);
     if (isPDA) keyBtn.style.display = 'none';   // no keyboard shortcuts on PDA
     keyBtn.title   = 'Click, then press the key you want for SEND / CONFIRM / NEXT';
     const stopBtn  = button('#7a1a1a', () => { localStorage.removeItem(KEY); S = null; panel.remove(); });
     stopBtn.textContent = '✕';
     stopBtn.style.cssText += ';position:absolute;top:4px;right:4px;padding:3px 10px;font-size:13px';
     panel.append(grip, info, sendBtn, vaultBtn, nextBtn, keyBtn, stopBtn, resize);
-    document.body.appendChild(panel);
+
+    // PDA: docked inside the page like a native Torn block (full width, scrolls with the page).
+    // The ≡ handle flips it between the top and bottom of the content; the choice is remembered.
+    let dock = 'top';
+    try { dock = (JSON.parse(localStorage.getItem(KEY_UI)) || {}).dock || 'top'; } catch (e) {}
+    const dockHost = () => document.querySelector('.content-wrapper') || document.getElementById('mainContainer') || document.body;
+    function dockPanel() {
+      const host = dockHost();
+      if (dock === 'top') { if (host.firstElementChild !== panel) host.prepend(panel); }
+      else if (host.lastElementChild !== panel) host.append(panel);
+    }
+    if (isPDA) {
+      panel.style.cssText = 'position:relative;box-sizing:border-box;display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:8px;width:auto;margin:8px 0;background:#1f2933;color:#e6e6e6;border:1px solid #4a4f57;border-radius:6px;padding:34px 10px 10px;font:bold 13px Arial,sans-serif';
+      resize.style.display = 'none';
+      info.style.cssText = 'flex:1 1 100%;text-align:center;font-size:14px';
+      [sendBtn, nextBtn, vaultBtn].forEach(b => b.style.flex = '1 1 auto');
+      grip.textContent = dock === 'top' ? '▼' : '▲';
+      grip.title = 'Move to the ' + (dock === 'top' ? 'bottom' : 'top') + ' of the page';
+      grip.style.cssText += ';position:absolute;top:4px;left:4px;cursor:pointer;font-size:16px;padding:4px 10px';
+      grip.onclick = () => {
+        dock = dock === 'top' ? 'bottom' : 'top';
+        grip.textContent = dock === 'top' ? '▼' : '▲';
+        grip.title = 'Move to the ' + (dock === 'top' ? 'bottom' : 'top') + ' of the page';
+        localStorage.setItem(KEY_UI, JSON.stringify({ dock: dock }));
+        dockPanel();
+      };
+      dockPanel();
+      setInterval(() => { if (S && !panel.isConnected) dockPanel(); }, 500);   // Torn re-renders the page
+    } else document.body.appendChild(panel);
 
     function show() {
       if (!S) return;
@@ -534,13 +615,13 @@
         };
       });
     }
-    track(grip,   (e, o) => place({ x: o.pos.x + e.clientX - o.x, y: o.pos.y + e.clientY - o.y, s: o.pos.s }));
-    track(resize, (e, o) => place({ x: o.pos.x, y: o.pos.y, s: Math.min(2.2, Math.max(0.6, o.pos.s * (o.w + e.clientX - o.x) / o.w)) }));
+    if (!isPDA) track(grip,   (e, o) => place({ x: o.pos.x + e.clientX - o.x, y: o.pos.y + e.clientY - o.y, s: o.pos.s }));
+    if (!isPDA) track(resize, (e, o) => place({ x: o.pos.x, y: o.pos.y, s: Math.min(2.2, Math.max(0.6, o.pos.s * (o.w + e.clientX - o.x) / o.w)) }));
 
     show();
     let saved = null;
     try { saved = JSON.parse(localStorage.getItem(KEY_UI)); } catch (e) {}
-    place(saved || { x: (innerWidth - panel.offsetWidth) / 2, y: innerHeight - panel.offsetHeight - 12, s: 1 });
+    if (!isPDA) place(saved && saved.s ? saved : { x: (innerWidth - panel.offsetWidth) / 2, y: innerHeight - panel.offsetHeight - 12, s: 1 });
     setInterval(show, 250);
   }
 
