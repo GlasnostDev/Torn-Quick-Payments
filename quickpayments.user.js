@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FFScouter - Profile Payment Pre-fill & Mail Pre-fill
 // @namespace    https://ffscouter.com/
-// @version      4.2
+// @version      4.3
 // @description  Pre-fills profile send-money (paymentamount, paymentref) and messages.php compose (mailsubject, mailbody). Added: FFScouter payment queue with a movable, resizable panel (two-step SEND by click or hotkey, delay between payments, VAULT shortfall button), item.php send pre-fill (e.g. Xanax), and a property ID / market price / happiness bar.
 // @author       FFScouter / Glasnost [1844049] & Solenya [4053619]
 // @match        https://www.torn.com/profiles.php*
@@ -356,10 +356,14 @@
       const n = document.createElement('div');
       n.id = 'ffq-note';
       n.textContent = text;
-      n.style.cssText = 'position:fixed;left:50%;bottom:72px;transform:translateX(-50%);z-index:2147483647;border-radius:6px;padding:8px 12px;font:bold 13px Arial,sans-serif;max-width:92vw;text-align:center;border:1px solid;' +
+      n.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);z-index:2147483647;border-radius:6px;padding:8px 12px;font:bold 13px Arial,sans-serif;max-width:92vw;text-align:center;border:1px solid;' +
         (ok ? 'background:#14532d;color:#d1fae5;border-color:#22c55e' : 'background:#7a1a1a;color:#f8d7da;border-color:#e05555');
       n.onclick = () => n.remove();
       document.body.appendChild(n);
+      // keep clear of the panel: above it if there is room, otherwise below it
+      const pr = document.getElementById('ffq-panel').getBoundingClientRect(), nh = n.offsetHeight + 12;
+      if (pr.top >= nh) n.style.bottom = (innerHeight - pr.top + 12) + 'px';
+      else n.style.top = Math.min(innerHeight - nh, pr.bottom + 12) + 'px';
       setTimeout(() => n.remove(), 6000);
     }
 
@@ -466,18 +470,21 @@
 
     const panel = document.createElement('div');
     panel.id = 'ffq-panel';
-    panel.style.cssText = 'position:fixed;left:0;top:0;z-index:2147483646;transform-origin:top left;display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:8px;width:max-content;max-width:96vw;background:#1f2933;color:#e6e6e6;border:1px solid #4a4f57;border-radius:8px;padding:8px 22px 8px 10px;font:bold 13px Arial,sans-serif;box-shadow:0 4px 18px rgba(0,0,0,.55)';
+    panel.style.cssText = 'position:fixed;left:0;top:0;z-index:2147483646;transform-origin:top left;display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:8px;width:max-content;max-width:96vw;background:#1f2933;color:#e6e6e6;border:1px solid #4a4f57;border-radius:8px;padding:30px 34px 22px 10px;font:bold 13px Arial,sans-serif;box-shadow:0 4px 18px rgba(0,0,0,.55)';
 
     const grip     = handle('≡', 'Drag to move', 'cursor:grab;font-size:20px;padding:0 6px');
-    const resize   = handle('◢', 'Drag to resize', 'position:absolute;right:3px;bottom:1px;cursor:nwse-resize;font-size:14px');
+    const resize   = handle('◢', 'Drag to resize', 'position:absolute;right:0;bottom:0;width:36px;height:36px;line-height:42px;text-align:center;background:#374151;border-radius:8px 0 8px 0;cursor:nwse-resize;font-size:22px');
     const info     = document.createElement('span');
     const sendBtn  = button('#15803d', step);
     const vaultBtn = button('#ea580c', toVault);
     const nextBtn  = button('#00ADB5', () => onPage(S) ? next() : (location.href = urlFor(S, S.i)));
     const keyBtn   = button('#374151', chooseKey);
+    const isPDA    = typeof window.flutter_inappwebview !== 'undefined' || /TornPDA/i.test(navigator.userAgent);
+    if (isPDA) keyBtn.style.display = 'none';   // no keyboard shortcuts on PDA
     keyBtn.title   = 'Click, then press the key you want for SEND / CONFIRM / NEXT';
     const stopBtn  = button('#7a1a1a', () => { localStorage.removeItem(KEY); S = null; panel.remove(); });
     stopBtn.textContent = '✕';
+    stopBtn.style.cssText += ';position:absolute;top:4px;right:4px;padding:3px 10px;font-size:13px';
     panel.append(grip, info, sendBtn, vaultBtn, nextBtn, keyBtn, stopBtn, resize);
     document.body.appendChild(panel);
 
