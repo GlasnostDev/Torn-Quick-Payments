@@ -12,7 +12,7 @@
 // @match        https://www.ffscouter.com/supportpanel/payment-provider*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @updateURL    https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js
-// @downloadURL  https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js
+// @downloadURL  https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpAayments.user.js
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
@@ -538,6 +538,18 @@
     const stopBtn  = button('#7a1a1a', () => { localStorage.removeItem(KEY); S = null; panel.remove(); });
     stopBtn.textContent = '✕';
     stopBtn.style.cssText += ';position:absolute;top:4px;right:4px;padding:3px 10px;font-size:13px';
+    // fixed-size buttons: the label shrinks to fit instead of the button resizing
+    [[sendBtn, 270], [nextBtn, 110], [vaultBtn, 170]].forEach(([b, w]) => {
+      b.style.cssText += ';box-sizing:border-box;width:' + w + 'px;height:40px;padding:0 8px;white-space:nowrap;overflow:hidden;min-width:0;text-align:center';
+    });
+    function fit(b, max) {
+      if (b._fitText === b.textContent && b._fitW === b.clientWidth) return;
+      b._fitText = b.textContent;
+      let size = max;
+      b.style.fontSize = size + 'px';
+      while (b.clientWidth && b.scrollWidth > b.clientWidth && size > 8) b.style.fontSize = --size + 'px';
+      b._fitW = b.clientWidth;
+    }
     panel.append(grip, info, sendBtn, vaultBtn, nextBtn, keyBtn, stopBtn, resize);
 
     // PDA: docked inside the page like a native Torn block (full width, scrolls with the page).
@@ -554,7 +566,9 @@
       panel.style.cssText = 'position:relative;box-sizing:border-box;display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:8px;width:auto;margin:8px 0;background:#1f2933;color:#e6e6e6;border:1px solid #4a4f57;border-radius:6px;padding:34px 10px 10px;font:bold 13px Arial,sans-serif';
       resize.style.display = 'none';
       info.style.cssText = 'flex:1 1 100%;text-align:center;font-size:14px';
-      [sendBtn, nextBtn, vaultBtn].forEach(b => b.style.flex = '1 1 auto');
+      sendBtn.style.cssText += ';flex:2 1 0;width:auto';
+      nextBtn.style.cssText += ';flex:1 1 0;width:auto';
+      vaultBtn.style.cssText += ';flex:1 1 100%;width:auto';
       grip.textContent = dock === 'top' ? '▼' : '▲';
       grip.title = 'Move to the ' + (dock === 'top' ? 'bottom' : 'top') + ' of the page';
       grip.style.cssText += ';position:absolute;top:4px;left:4px;cursor:pointer;font-size:16px;padding:4px 10px';
@@ -591,6 +605,7 @@
 
       nextBtn.textContent = !here ? 'Open ▶' : (S.i === S.q.length - 1 ? 'Finish' : 'Next ▶');
       keyBtn.textContent  = capturing ? 'Press a key…' : 'Key: ' + keyName(getKey());
+      fit(sendBtn, 14); fit(nextBtn, 14); fit(vaultBtn, 14);
     }
 
     let pos;
