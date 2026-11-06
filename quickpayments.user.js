@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FFScouter - Profile Payment Pre-fill & Mail Pre-fill
 // @namespace    https://ffscouter.com/
-// @version      4.4
+// @version      4.5
 // @description  Pre-fills profile send-money (paymentamount, paymentref) and messages.php compose (mailsubject, mailbody). Added: FFScouter payment queue with a movable, resizable panel (two-step SEND by click or hotkey, delay between payments, VAULT shortfall button), item.php send pre-fill (e.g. Xanax), and a property ID / market price / happiness bar.
 // @author       FFScouter / Glasnost [1844049] & Solenya [4053619]
 // @match        https://www.torn.com/profiles.php*
@@ -12,7 +12,7 @@
 // @match        https://www.ffscouter.com/supportpanel/payment-provider*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @updateURL    https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js
-// @downloadURL  https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpAayments.user.js
+// @downloadURL  https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
@@ -117,7 +117,8 @@
       const banner = document.createElement('div');
       banner.id = 'ffscouter-cash-warning';
       banner.style.cssText = [
-        'position:fixed', 'top:16px', 'left:50%', 'transform:translateX(-50%)',
+        'position:fixed', (/TornPDA/i.test(navigator.userAgent) || typeof window.flutter_inappwebview !== 'undefined' ? 'bottom:84px' : 'bottom:24px'),
+        'left:50%', 'transform:translateX(-50%)',
         'z-index:2147483647', 'background:#7a1a1a', 'color:#f8d7da',
         'border:2px solid #e05555', 'border-radius:6px', 'padding:14px 20px',
         'font:bold 14px/1.5 Arial,sans-serif',
@@ -260,11 +261,11 @@
   const q    = new URLSearchParams(location.search);
   const path = location.pathname;
 
-  const VERSION    = '4.4';   // keep in sync with @version above
+  const VERSION    = '4.8';   // keep in sync with @version above
   const UPDATE_URL = 'https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js';   // empty = update check off
   const isPDA      = typeof window.flutter_inappwebview !== 'undefined' || /TornPDA/i.test(navigator.userAgent);
 
-  // ── update check: once every 6 h, shows a dismissible banner when UPDATE_URL has a newer @version ──
+  // ── update check: once every 30 min, shows a dismissible banner when UPDATE_URL has a newer @version ──
   function updateCheck() {
     if (!UPDATE_URL || /(^|\.)ffscouter\.com$/.test(location.hostname)) return;
     const KEY_UPD = 'ffscouter_update_v1';
@@ -300,7 +301,7 @@
       if (m && newer(m[1], VERSION)) { st.latest = m[1]; banner(m[1]); } else st.latest = null;
     };
     if (st.latest && newer(st.latest, VERSION)) banner(st.latest);
-    if (Date.now() - (st.checked || 0) < 6 * 3600 * 1000) return;
+    if (Date.now() - (st.checked || 0) < 30 * 60 * 1000) return;
     st.checked = Date.now();
     try { localStorage.setItem(KEY_UPD, JSON.stringify(st)); } catch (e) {}
     const url = UPDATE_URL + (UPDATE_URL.includes('?') ? '&' : '?') + 't=' + Date.now();
@@ -327,6 +328,35 @@
     const usable = () => [...document.querySelectorAll('#claimed-jobs .job-card[data-job-status="pending"] a[data-receiver-link]')]
       .filter(a => { const p = new URL(a.href).searchParams; return p.get('XID') && p.get('paymentamount') && p.get('paymentref'); });
 
+    const jobId = a => {
+      const card = a.closest('.job-card'), b = card && card.querySelector('[data-release]');
+      return b && /^\d+$/.test(b.dataset.release) ? b.dataset.release : '';
+    };
+
+    // opened from the Torn queue panel: release that job here, where the session and CSRF token live
+    const rel = q.get('ffrelease');
+    if (/^\d+$/.test(rel || '')) {
+      const meta = document.querySelector('meta[name="csrf-token"]');
+      const xsrf = (document.cookie.match(/XSRF-TOKEN=([^;]+)/) || [])[1];
+      const headers = { accept: 'application/json', 'content-type': 'application/json', 'x-requested-with': 'XMLHttpRequest' };
+      if (meta) headers['x-csrf-token'] = meta.content;
+      else if (xsrf) headers['x-xsrf-token'] = decodeURIComponent(xsrf);
+      const say = (text, ok) => {
+        const d = document.createElement('div');
+        d.textContent = text;
+        d.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:2147483647;border-radius:6px;padding:10px 16px;font:bold 14px Arial,sans-serif;border:1px solid;' +
+          (ok ? 'background:#14532d;color:#d1fae5;border-color:#22c55e' : 'background:#7a1a1a;color:#f8d7da;border-color:#e05555');
+        document.body.appendChild(d);
+      };
+      fetch('/supportpanel/payment-provider/jobs/' + rel + '/release', { method: 'POST', headers: headers, body: '{}', credentials: 'include' })
+        .then(r => r.json().catch(() => ({})).then(j => {
+          const ok = r.ok && j.code === 0;   // panel answers {"code":0} on success
+          say(ok ? 'Job ' + rel + ' released' : 'Release failed (' + r.status + (j.code ? ', code ' + j.code : '') + ') - release it from this page by hand', ok);
+          if (ok) setTimeout(() => location.replace(location.pathname), 1500);
+        }))
+        .catch(() => say('Release failed - release it from this page by hand'));
+    }
+
     function queueUrl() {
       const links = usable();
       const rows  = links.map(a => new URL(a.href).searchParams);
@@ -336,7 +366,7 @@
         const ref = p.get('paymentref');
         return [p.get('XID'), p.get('paymentamount'),
                 sfx && ref.endsWith(sfx) ? ref.slice(0, -sfx.length) + '§' : ref,   // § = shared ending, kept once
-                p.get('anonymous') === '1' ? 1 : 0];
+                p.get('anonymous') === '1' ? 1 : 0, jobId(links[rows.indexOf(p)])];
       });
       const b64 = btoa(unescape(encodeURIComponent(JSON.stringify({ s: sfx, q: queue }))));
       return links[0].href + '&ffq=' + encodeURIComponent(b64);
@@ -413,11 +443,8 @@
         (ok ? 'background:#14532d;color:#d1fae5;border-color:#22c55e' : 'background:#7a1a1a;color:#f8d7da;border-color:#e05555');
       n.onclick = () => n.remove();
       document.body.appendChild(n);
-      // keep clear of the panel: above it if there is room, otherwise below it
-      const pr = document.getElementById('ffq-panel').getBoundingClientRect(), nh = n.offsetHeight + 12;
-      if (isPDA) n.style.bottom = '84px';   // docked panel scrolls with the page, so pin the note above PDA's bottom bar
-      else if (pr.top >= nh) n.style.bottom = (innerHeight - pr.top + 12) + 'px';
-      else n.style.top = Math.min(innerHeight - nh, pr.bottom + 12) + 'px';
+      // the docked panel scrolls with the page, so pin the note to the bottom (above PDA's bottom bar)
+      n.style.bottom = isPDA ? '84px' : '24px';
       setTimeout(() => n.remove(), 6000);
     }
 
@@ -524,13 +551,27 @@
 
     const panel = document.createElement('div');
     panel.id = 'ffq-panel';
-    panel.style.cssText = 'position:fixed;left:0;top:0;z-index:2147483646;transform-origin:top left;display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:8px;width:max-content;max-width:96vw;background:#1f2933;color:#e6e6e6;border:1px solid #4a4f57;border-radius:8px;padding:30px 34px 22px 10px;font:bold 13px Arial,sans-serif;box-shadow:0 4px 18px rgba(0,0,0,.55)';
+    // docked inside the page like a native Torn block (full width, scrolls with the page)
+    panel.style.cssText = 'position:relative;box-sizing:border-box;display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:8px;width:auto;margin:8px 0;background:#1f2933;color:#e6e6e6;border:1px solid #4a4f57;border-radius:6px;padding:34px 10px 10px;font:bold 13px Arial,sans-serif';
 
-    const grip     = handle('≡', 'Drag to move', 'cursor:grab;font-size:20px;padding:0 6px');
-    const resize   = handle('◢', 'Drag to resize', 'position:absolute;right:0;bottom:0;width:36px;height:36px;line-height:42px;text-align:center;background:#374151;border-radius:8px 0 8px 0;cursor:nwse-resize;font-size:22px');
+    const grip     = handle('▼', '', 'position:absolute;top:4px;left:4px;cursor:pointer;font-size:16px;padding:4px 10px');
     const info     = document.createElement('span');
+    info.style.cssText = 'flex:1 1 100%;text-align:center;font-size:14px';
+    const btnRow   = document.createElement('div');
+    btnRow.style.cssText = 'display:flex;flex-wrap:nowrap;gap:8px;flex:1 1 100%;min-width:0';
     const sendBtn  = button('#15803d', step);
     const vaultBtn = button('#ea580c', toVault);
+    const releaseBtn = button('#92400e', () => {
+      const it = S.q[S.i];
+      if (!it[4] || paid(S) || !confirm('Release [' + it[0] + '] from the support panel queue? This skips them without paying.')) return;
+      window.open('https://ffscouter.com/supportpanel/payment-provider?ffrelease=' + it[4], '_blank');
+      (S.r = S.r || []).push(S.i);
+      S.d.push(S.i);
+      save(S);
+      show();
+    });
+    releaseBtn.textContent = 'Release';
+    releaseBtn.title = 'Releases this job on the FFScouter support panel and skips it';
     const nextBtn  = button('#00ADB5', () => onPage(S) ? next() : (location.href = urlFor(S, S.i)));
     const keyBtn   = button('#374151', chooseKey);
     if (isPDA) keyBtn.style.display = 'none';   // no keyboard shortcuts on PDA
@@ -538,9 +579,9 @@
     const stopBtn  = button('#7a1a1a', () => { localStorage.removeItem(KEY); S = null; panel.remove(); });
     stopBtn.textContent = '✕';
     stopBtn.style.cssText += ';position:absolute;top:4px;right:4px;padding:3px 10px;font-size:13px';
-    // fixed-size buttons: the label shrinks to fit instead of the button resizing
-    [[sendBtn, 270], [nextBtn, 110], [vaultBtn, 170]].forEach(([b, w]) => {
-      b.style.cssText += ';box-sizing:border-box;width:' + w + 'px;height:40px;padding:0 8px;white-space:nowrap;overflow:hidden;min-width:0;text-align:center';
+    // fixed proportions on one non-wrapping row: the label shrinks to fit instead of the button resizing
+    [[sendBtn, '3 1 0'], [nextBtn, '1.3 1 0'], [releaseBtn, '1 1 0'], [vaultBtn, '1 1 100%']].forEach(([b, f]) => {
+      b.style.cssText += ';box-sizing:border-box;flex:' + f + ';height:40px;padding:0 8px;white-space:nowrap;overflow:hidden;min-width:0;text-align:center';
     });
     function fit(b, max) {
       if (b._fitText === b.textContent && b._fitW === b.clientWidth) return;
@@ -550,10 +591,10 @@
       while (b.clientWidth && b.scrollWidth > b.clientWidth && size > 8) b.style.fontSize = --size + 'px';
       b._fitW = b.clientWidth;
     }
-    panel.append(grip, info, sendBtn, vaultBtn, nextBtn, keyBtn, stopBtn, resize);
+    btnRow.append(sendBtn, releaseBtn, nextBtn);
+    panel.append(grip, info, btnRow, vaultBtn, keyBtn, stopBtn);
 
-    // PDA: docked inside the page like a native Torn block (full width, scrolls with the page).
-    // The ≡ handle flips it between the top and bottom of the content; the choice is remembered.
+    // The ▼ / ▲ handle flips the panel between the top and bottom of the content; the choice is remembered.
     let dock = 'top';
     try { dock = (JSON.parse(localStorage.getItem(KEY_UI)) || {}).dock || 'top'; } catch (e) {}
     const dockHost = () => document.querySelector('.content-wrapper') || document.getElementById('mainContainer') || document.body;
@@ -562,26 +603,19 @@
       if (dock === 'top') { if (host.firstElementChild !== panel) host.prepend(panel); }
       else if (host.lastElementChild !== panel) host.append(panel);
     }
-    if (isPDA) {
-      panel.style.cssText = 'position:relative;box-sizing:border-box;display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:8px;width:auto;margin:8px 0;background:#1f2933;color:#e6e6e6;border:1px solid #4a4f57;border-radius:6px;padding:34px 10px 10px;font:bold 13px Arial,sans-serif';
-      resize.style.display = 'none';
-      info.style.cssText = 'flex:1 1 100%;text-align:center;font-size:14px';
-      sendBtn.style.cssText += ';flex:2 1 0;width:auto';
-      nextBtn.style.cssText += ';flex:1 1 0;width:auto';
-      vaultBtn.style.cssText += ';flex:1 1 100%;width:auto';
+    const gripLabel = () => {
       grip.textContent = dock === 'top' ? '▼' : '▲';
       grip.title = 'Move to the ' + (dock === 'top' ? 'bottom' : 'top') + ' of the page';
-      grip.style.cssText += ';position:absolute;top:4px;left:4px;cursor:pointer;font-size:16px;padding:4px 10px';
-      grip.onclick = () => {
-        dock = dock === 'top' ? 'bottom' : 'top';
-        grip.textContent = dock === 'top' ? '▼' : '▲';
-        grip.title = 'Move to the ' + (dock === 'top' ? 'bottom' : 'top') + ' of the page';
-        localStorage.setItem(KEY_UI, JSON.stringify({ dock: dock }));
-        dockPanel();
-      };
+    };
+    gripLabel();
+    grip.onclick = () => {
+      dock = dock === 'top' ? 'bottom' : 'top';
+      gripLabel();
+      localStorage.setItem(KEY_UI, JSON.stringify({ dock: dock }));
       dockPanel();
-      setInterval(() => { if (S && !panel.isConnected) dockPanel(); }, 500);   // Torn re-renders the page
-    } else document.body.appendChild(panel);
+    };
+    dockPanel();
+    setInterval(() => { if (S && !panel.isConnected) dockPanel(); }, 500);   // Torn re-renders the page
 
     function show() {
       if (!S) return;
@@ -590,7 +624,7 @@
 
       let text, bg;
       if (atVault)         { text = withdrew || !n ? 'BACK TO QUEUE ▶' : 'WITHDRAW $' + n.toLocaleString('en-US'); bg = withdrew || !n ? '#00ADB5' : '#ea580c'; }
-      else if (paid(S))    { text = 'PAID ✓ · NEXT ▶'; bg = '#00ADB5'; }
+      else if (paid(S))    { text = (S.r || []).indexOf(S.i) !== -1 ? 'RELEASED · NEXT ▶' : 'PAID ✓ · NEXT ▶'; bg = '#00ADB5'; }
       else if (sending)    { text = 'SENDING…';        bg = '#4a4f57'; }
       else if (wait() > 0) { text = 'WAIT ' + (Math.ceil(wait() / 100) / 10).toFixed(1) + 's'; bg = '#4a4f57'; }
       else if (armed === S.i && Date.now() - armedAt <= ARM_MS) { text = 'CONFIRM ' + amt + ' → [' + it[0] + ']'; bg = '#1d4ed8'; }
@@ -599,6 +633,7 @@
       sendBtn.style.background = bg;
       sendBtn.style.display = here || atVault ? '' : 'none';
 
+      releaseBtn.style.display = it[4] && !paid(S) && !atVault ? '' : 'none';
       vaultBtn.style.display = n > 0 && !atVault ? '' : 'none';
       vaultBtn.textContent = 'VAULT $' + n.toLocaleString('en-US');
       vaultBtn.title = 'Opens your vault with $' + n.toLocaleString('en-US') + ' pre-filled (cash the rest of the queue still needs)';
@@ -608,35 +643,7 @@
       fit(sendBtn, 14); fit(nextBtn, 14); fit(vaultBtn, 14);
     }
 
-    let pos;
-    function place(u) {
-      const w = panel.offsetWidth * u.s, h = panel.offsetHeight * u.s;
-      pos = { x: Math.min(Math.max(0, u.x), Math.max(0, innerWidth - w)),
-              y: Math.min(Math.max(0, u.y), Math.max(0, innerHeight - h)), s: u.s };
-      panel.style.left = pos.x + 'px';
-      panel.style.top  = pos.y + 'px';
-      panel.style.transform = 'scale(' + pos.s + ')';
-    }
-    function track(el, onMove) {
-      el.addEventListener('pointerdown', e => {
-        e.preventDefault();
-        e.stopPropagation();
-        el.setPointerCapture(e.pointerId);
-        const o = { x: e.clientX, y: e.clientY, pos: pos, w: panel.offsetWidth * pos.s };
-        el.onpointermove = ev => onMove(ev, o);
-        el.onpointerup = el.onpointercancel = () => {
-          el.onpointermove = el.onpointerup = el.onpointercancel = null;
-          localStorage.setItem(KEY_UI, JSON.stringify(pos));
-        };
-      });
-    }
-    if (!isPDA) track(grip,   (e, o) => place({ x: o.pos.x + e.clientX - o.x, y: o.pos.y + e.clientY - o.y, s: o.pos.s }));
-    if (!isPDA) track(resize, (e, o) => place({ x: o.pos.x, y: o.pos.y, s: Math.min(2.2, Math.max(0.6, o.pos.s * (o.w + e.clientX - o.x) / o.w)) }));
-
     show();
-    let saved = null;
-    try { saved = JSON.parse(localStorage.getItem(KEY_UI)); } catch (e) {}
-    if (!isPDA) place(saved && saved.s ? saved : { x: (innerWidth - panel.offsetWidth) / 2, y: innerHeight - panel.offsetHeight - 12, s: 1 });
     setInterval(show, 250);
   }
 
