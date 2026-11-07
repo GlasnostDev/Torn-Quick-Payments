@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FFScouter - Profile Payment Pre-fill & Mail Pre-fill
 // @namespace    https://ffscouter.com/
-// @version      4.6
+// @version      4.7
 // @description  Pre-fills profile send-money (paymentamount, paymentref) and messages.php compose (mailsubject, mailbody). Added: FFScouter payment queue with a movable, resizable panel (two-step SEND by click or hotkey, delay between payments, VAULT shortfall button), item.php send pre-fill (e.g. Xanax), and a property ID / market price / happiness bar.
 // @author       FFScouter / Glasnost [1844049] & Solenya [4053619]
 // @match        https://www.torn.com/profiles.php*
@@ -254,13 +254,14 @@
 
 })();
 
+// SOLENYA ADDITIONS // 
 (function () {
   'use strict';
 
   const q    = new URLSearchParams(location.search);
   const path = location.pathname;
 
-  const VERSION    = '4.6';   // keep in sync with @version above
+  const VERSION    = '4.7';   // keep in sync with @version above
   const UPDATE_URL = 'https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js';   // empty = update check off
   const isPDA      = typeof window.flutter_inappwebview !== 'undefined' || /TornPDA/i.test(navigator.userAgent);
 
@@ -324,8 +325,24 @@
 
   // ── ffscouter.com: send pending payments to Torn as a queue ──
   function ffscouterSender() {
-    const usable = () => [...document.querySelectorAll('#claimed-jobs .job-card[data-job-status="pending"] a[data-receiver-link]')]
-      .filter(a => { const u = new URL(a.href), p = u.searchParams; return u.pathname === '/profiles.php' && p.get('XID') && p.get('paymentamount') && p.get('paymentref'); });   // profile pay links only, never a mail Compose link
+    // payments the Torn queue tab reported as sent (it posts them back to this tab, which opened it); they are
+    // left out of the next queue so a job the panel has not confirmed yet is never opened or paid again
+    const KEY_SENT = 'ffscouter_sent_v1', SENT_TTL = 30 * 60 * 1000;
+    const sentLedger = () => {
+      let l = {};
+      try { l = JSON.parse(localStorage.getItem(KEY_SENT)) || {}; } catch (e) {}
+      Object.keys(l).forEach(k => { if (Date.now() - l[k] > SENT_TTL) delete l[k]; });
+      return l;
+    };
+    window.addEventListener('message', e => {
+      if (e.origin !== 'https://www.torn.com' || !e.data || !Array.isArray(e.data.ffSent)) return;
+      const l = sentLedger();
+      e.data.ffSent.forEach(r => { if (typeof r[0] === 'string' && Number(r[1]) > 0) l[r[0].trim()] = Math.min(Number(r[1]), Date.now()); });
+      try { localStorage.setItem(KEY_SENT, JSON.stringify(l)); } catch (err) {}
+    });
+
+    const usable = () => { const l = sentLedger(); return [...document.querySelectorAll('#claimed-jobs .job-card[data-job-status="pending"] a[data-receiver-link]')]
+      .filter(a => { const u = new URL(a.href), p = u.searchParams; return u.pathname === '/profiles.php' && p.get('XID') && p.get('paymentamount') && p.get('paymentref') && !l[p.get('paymentref').trim()]; }); };   // profile pay links only, never a mail Compose link
 
     const jobId = a => {
       const card = a.closest('.job-card'), b = card && card.querySelector('[data-release]');
@@ -368,7 +385,9 @@
                 p.get('anonymous') === '1' ? 1 : 0, jobId(links[rows.indexOf(p)])];
       });
       const b64 = btoa(unescape(encodeURIComponent(JSON.stringify({ s: sfx, q: queue }))));
-      return links[0].href + '&ffq=' + encodeURIComponent(b64);
+      // first player's profile without the pay pre-fill: if Torn knows that job is already paid, it moves on to the
+      // first unpaid player itself, and an empty form there can never pay them twice
+      return 'https://www.torn.com/profiles.php?XID=' + rows[0].get('XID') + '&ffq=' + encodeURIComponent(b64);
     }
 
     const btn = document.createElement('button');
@@ -403,16 +422,85 @@
     };
     const save = s => { s.t = Date.now(); localStorage.setItem(KEY, JSON.stringify(s)); };
 
+    // ledger of payments already sent (by their unique payment reference), so a job the panel still shows
+    // as pending is not paid twice when it comes back in a later queue
+    const KEY_SENT = 'ffscouter_sent_v1', SENT_TTL = 30 * 60 * 1000;
+    const sentLedger = () => {
+      let l = {};
+      try { l = JSON.parse(localStorage.getItem(KEY_SENT)) || {}; } catch (e) {}
+      Object.keys(l).forEach(k => { if (Date.now() - l[k] > SENT_TTL) delete l[k]; });
+      return l;
+    };
+    // tell the support panel tab that opened this queue (if it is still open) which payments are sent
+    const tellPanel = l => {
+      const data = { ffSent: Object.keys(l).map(k => [k, l[k]]) };
+      if (!data.ffSent.length || !window.opener) return;
+      ['https://ffscouter.com', 'https://www.ffscouter.com'].forEach(o => { try { window.opener.postMessage(data, o); } catch (e) {} });
+    };
+    const markSent = ref => { const l = sentLedger(); l[String(ref).trim()] = Date.now(); localStorage.setItem(KEY_SENT, JSON.stringify(l)); tellPanel(l); };
+    tellPanel(sentLedger());
+
+    // also remember payments sent with Torn's own SEND button (the pre-filled form), not just the queue's:
+    // watch Torn's sendcash.php calls and record the message of every one Torn confirms
+    const sentCall = (url, body, text) => {
+      if (!/sendcash\.php/.test(url || '')) return;
+      try {
+        const p = body instanceof FormData ? body : new URLSearchParams(typeof body === 'string' ? body : '');
+        if (/cash1/.test(p.get('step') || '') && p.get('tag') && JSON.parse(text).success === true) markSent(p.get('tag'));
+      } catch (e) {}
+    };
+    const xhrOpen = XMLHttpRequest.prototype.open, xhrSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function (m, u) { this._ffUrl = String(u); return xhrOpen.apply(this, arguments); };
+    XMLHttpRequest.prototype.send = function (body) {
+      this.addEventListener('load', () => sentCall(this._ffUrl, body, this.responseText));
+      return xhrSend.apply(this, arguments);
+    };
+    const nativeFetch = window.fetch;
+    window.fetch = function (input, init) {
+      const url = typeof input === 'string' ? input : input && input.url, body = init && init.body;
+      return nativeFetch.apply(this, arguments).then(r => { r.clone().text().then(t => sentCall(url, body, t)).catch(() => {}); return r; });
+    };
+    function skipNote(text) {
+      const n = document.createElement('div');
+      n.textContent = text;
+      n.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);z-index:2147483647;border-radius:6px;padding:8px 12px;font:bold 13px Arial,sans-serif;max-width:92vw;text-align:center;border:1px solid #d4a017;background:#4a3a0a;color:#fde68a;bottom:' + (isPDA ? '84px' : '24px');
+      n.onclick = () => n.remove();
+      document.body.appendChild(n);
+      setTimeout(() => n.remove(), 10000);
+    }
+
+    let skipped = 0;
     if (q.get('ffq')) {
       try {
         const p = JSON.parse(decodeURIComponent(escape(atob(q.get('ffq')))));
-        save({ q: p.q.filter(r => /^\d+$/.test(r[0]) && /^\d+$/.test(r[1])), s: p.s || '', i: 0, d: [] });
+        const ledger = sentLedger();
+        const rows = p.q.filter(r => /^\d+$/.test(r[0]) && /^\d+$/.test(r[1]));
+        const fresh = rows.filter(r => !ledger[String(r[2]).replace('§', () => p.s || '').trim()]);
+        skipped = rows.length - fresh.length;
+        if (fresh.length) save({ q: fresh, s: p.s || '', i: 0, d: [] });
+        else localStorage.removeItem(KEY);
+        // the queue link lands on the panel's first job; if that one was just left out, go straight to the first
+        // unpaid queue entry (with its pre-fill); with none left, stay here - the link carries no pre-fill
+        const here = q.get('XID'), f = fresh[0];
+        if (f && f[0] !== here) {
+          location.replace('/profiles.php?XID=' + f[0] + '&paymentamount=' + f[1] + '&paymentref=' +
+            encodeURIComponent(String(f[2]).replace('§', () => p.s || '')) + (f[3] ? '&anonymous=1' : '') +
+            (skipped ? '&ffskip=' + skipped : ''));
+          return;
+        }
         const u = new URL(location.href);
         u.searchParams.delete('ffq');
         history.replaceState(null, '', u);
       } catch (e) { console.warn('[FFScouter] Could not read queue from URL', e); }
     }
+    if (!skipped && /^\d+$/.test(q.get('ffskip') || '')) {
+      skipped = Number(q.get('ffskip'));
+      const u = new URL(location.href);
+      u.searchParams.delete('ffskip');
+      history.replaceState(null, '', u);
+    }
 
+    if (skipped) skipNote(skipped + ' payment' + (skipped > 1 ? 's' : '') + ' already sent from this browser - left out of the queue. Wait for the panel to confirm them.');
     let S = load();
     if (!S) return;
 
@@ -495,7 +583,12 @@
         headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' },
         body: new URLSearchParams({ step: 'cash1', ID: it[0], money: it[1], tag: msg(S, S.i), theanon: it[3] ? 'true' : 'false' }).toString()
       }).then(r => r.json()).then(j => {
-        if (j.success === true) { S.d.push(S.i); save(S); note(strip(j.text) || 'Sent ✓', true); }
+        if (j.success === true) {
+          S.d.push(S.i); markSent(msg(S, S.i)); save(S);
+          const last = S.i === S.q.length - 1;
+          note((strip(j.text) || 'Sent ✓') + (last ? ' · Queue finished ✓' : ''), true);
+          if (last) next();   // last player paid: close the queue
+        }
         else note(strip(j.text) || 'Torn did not confirm the payment - check your send log before retrying.');
       }).catch(() => note('Request failed - check your Torn send log before retrying.'))
         .then(() => { localStorage.setItem(KEY_LAST, Date.now()); sending = false; show(); });
@@ -567,6 +660,7 @@
       (S.r = S.r || []).push(S.i);
       S.d.push(S.i);
       save(S);
+      if (S.i === S.q.length - 1) { note('Released · Queue finished ✓', true); return next(); }   // last player released: close the queue
       show();
     });
     releaseBtn.textContent = 'Release';
