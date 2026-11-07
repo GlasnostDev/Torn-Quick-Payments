@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         FFScouter - Profile Payment Pre-fill & Mail Pre-fill
 // @namespace    https://ffscouter.com/
-// @version      4.8
-// @description  Pre-fills profile send-money (paymentamount, paymentref) and messages.php compose (mailsubject, mailbody). Added: FFScouter payment queue with a movable, resizable panel (two-step SEND by click or hotkey, delay between payments, VAULT shortfall button), item.php send pre-fill (e.g. Xanax), a property ID / market price / happiness bar, and an outreach mail queue (loss-buy-marketing to Torn compose, 10 s gap between mails).
+// @version      4.9
+// @description  Pre-fills profile send-money (paymentamount, paymentref) and messages.php compose (mailsubject, mailbody). Added: FFScouter payment queue with a movable, resizable panel (two-step SEND by click or hotkey, delay between payments, VAULT or ghost-trade shortfall button), item.php send pre-fill (e.g. Xanax), a property ID / market price / happiness bar, and an outreach mail queue (loss-buy-marketing to Torn compose, 10 s gap between mails).
 // @author       FFScouter / Glasnost [1844049] & Solenya [4053619]
 // @match        https://www.torn.com/profiles.php*
 // @match        https://www.torn.com/messages.php*
 // @match        https://www.torn.com/properties.php*
 // @match        https://www.torn.com/item.php*
+// @match        https://www.torn.com/trade.php*
 // @match        https://ffscouter.com/supportpanel/payment-provider*
 // @match        https://www.ffscouter.com/supportpanel/payment-provider*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
@@ -254,14 +255,14 @@
 
 })();
 
-// SOLENYA ADDITIONS //
+// SOLENYA ADDITIONS // 
 (function () {
   'use strict';
 
   const q    = new URLSearchParams(location.search);
   const path = location.pathname;
 
-  const VERSION    = '5.9';   // keep in sync with @version above
+  const VERSION    = '6.3';   // keep in sync with @version above
   const UPDATE_URL = 'https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js';   // empty = update check off
   const isPDA      = typeof window.flutter_inappwebview !== 'undefined' || /TornPDA/i.test(navigator.userAgent);
 
@@ -344,8 +345,38 @@
     b._fitW = b.clientWidth;
   }
 
+  // queue panels sit at the top of the page like a native Torn block. The ▲ / ▼ handle minimises a panel to its
+  // info line (the hotkey still works); the choice is remembered. Parts marked .ffq-keep stay visible when minimised.
+  const dockHost = () => document.querySelector('.content-wrapper') || document.getElementById('mainContainer') || document.body;
+  function dockPanel(panel, grip, alive) {
+    const KEY_UI = 'ffscouter_panel_ui_v1';
+    if (!document.getElementById('ffq-style')) {
+      const st = document.createElement('style');
+      st.id = 'ffq-style';
+      st.textContent = '#ffq-panel[data-min="1"]>:not(.ffq-keep){display:none!important}#ffq-panel[data-min="1"]{padding-bottom:8px!important}';
+      document.head.appendChild(st);
+    }
+    let min = false;
+    try { min = !!(JSON.parse(localStorage.getItem(KEY_UI)) || {}).min; } catch (e) {}
+    const label = () => {
+      panel.dataset.min = min ? '1' : '';
+      grip.textContent = min ? '▼' : '▲';
+      grip.title = min ? 'Show the queue buttons' : 'Minimise the panel (the hotkey still works)';
+    };
+    label();
+    grip.onclick = () => {
+      min = !min;
+      label();
+      localStorage.setItem(KEY_UI, JSON.stringify({ min: min }));
+    };
+    const put = () => { const host = dockHost(); if (host.firstElementChild !== panel) host.prepend(panel); };
+    put();
+    setInterval(() => { if (alive() && !panel.isConnected) put(); }, 500);   // Torn re-renders the page
+  }
+
   if (/(^|\.)ffscouter\.com$/.test(location.hostname)) return /\/loss-buy-marketing\/?$/.test(path) ? outreachSender() : ffscouterSender();
   if (path === '/properties.php') { propertiesPage(); if (q.has('ffvault')) queuePanel(); return; }
+  if (path === '/trade.php')      { if (q.has('fftrade')) queuePanel(); return; }
   if (path === '/item.php')       return itemPrefill().catch(e => console.error('[FFScouter item]', e));
   if (path === '/profiles.php')   return queuePanel();
   if (path === '/messages.php')   return mailPanel();
@@ -422,7 +453,7 @@
                 sfx && ref.endsWith(sfx) ? ref.slice(0, -sfx.length) + '§' : ref,   // § = shared ending, kept once
                 p.get('anonymous') === '1' ? 1 : 0, jobId(links[rows.indexOf(p)])];
       });
-      const b64 = btoa(unescape(encodeURIComponent(JSON.stringify({ s: sfx, q: queue }))));
+      const b64 = btoa(unescape(encodeURIComponent(JSON.stringify({ s: sfx, q: queue, c: cashSrc() }))));
       // first player's profile without the pay pre-fill: if Torn knows that job is already paid, it moves on to the
       // first unpaid player itself, and an empty form there can never pay them twice
       return 'https://www.torn.com/profiles.php?XID=' + rows[0].get('XID') + '&ffq=' + encodeURIComponent(b64);
@@ -433,8 +464,20 @@
     btn.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;background:#ea580c;color:#fff;border:0;border-radius:6px;padding:10px 14px;font:bold 14px Arial,sans-serif;cursor:pointer';
     document.body.appendChild(btn);
 
+    // where the Torn queue takes you when cash runs short: the vault or your ghost trade. Saved here and sent with
+    // every queue, so it is the default until it is clicked again
+    const KEY_SRC = 'ffscouter_cashsrc_v1';
+    const cashSrc = () => localStorage.getItem(KEY_SRC) === 'trade' ? 'trade' : 'vault';
+    const srcBtn = document.createElement('button');
+    srcBtn.type = 'button';
+    srcBtn.title = 'Where the Torn queue gets cash when you run short. Click to switch.';
+    srcBtn.style.cssText = btn.style.cssText + ';bottom:62px;background:#374151';
+    srcBtn.addEventListener('click', () => { localStorage.setItem(KEY_SRC, cashSrc() === 'trade' ? 'vault' : 'trade'); refresh(); });
+    document.body.appendChild(srcBtn);
+
     const refresh = () => {
       const n = usable().length;
+      srcBtn.textContent = 'Cash from: ' + (cashSrc() === 'trade' ? 'Ghost trade' : 'Vault') + ' ⇄';
       btn.textContent   = n ? 'Send ' + n + ' to Torn queue' : 'No pending payments';
       btn.disabled      = !n;
       btn.style.opacity = n ? '1' : '0.5';
@@ -524,8 +567,7 @@
 
   // ── profiles.php: queue panel (hit 1 arm, hit 2 send, hit 3 next) ──
   function queuePanel() {
-    const KEY = 'ffscouter_queue_v2', KEY_HK = 'ffscouter_hotkey_v1',
-          KEY_UI = 'ffscouter_panel_ui_v1', KEY_LAST = 'ffscouter_lastsend_v1';
+    const KEY = 'ffscouter_queue_v2', KEY_HK = 'ffscouter_hotkey_v1', KEY_LAST = 'ffscouter_lastsend_v1';
     const SEND_GAP = 2000;
     const ARM_MS   = 30000;
 
@@ -593,6 +635,7 @@
         const fresh = rows.filter(r => !ledger[String(r[2]).replace('§', () => p.s || '').trim()]);
         skipped = rows.length - fresh.length;
         if (fresh.length) save({ q: fresh, s: p.s || '', i: 0, d: [] });
+        if (p.c === 'trade' || p.c === 'vault') localStorage.setItem('ffscouter_cashsrc_v1', p.c);   // the support panel's choice
         else localStorage.removeItem(KEY);
         // the queue link lands on the panel's first job with no pre-fill. If Torn knows that one is already paid,
         // the panel shows "not on this player" and its Open button takes you to the first unpaid player: one click,
@@ -653,6 +696,20 @@
       .find(b => /^withdraw$/i.test(b.value) && b.offsetParent !== null);
     if (atVault) document.addEventListener('click', e => { if (e.isTrusted && e.target === withdrawBtn()) withdrew = true; }, true);
 
+    // where short cash comes from: the vault (amount pre-filled) or a ghost trade (take the money out by hand).
+    // The choice is remembered for every queue until it is flipped again.
+    const KEY_SRC = 'ffscouter_cashsrc_v1', KEY_GHOST = 'ffscouter_ghosttrade_v1';
+    const src = () => localStorage.getItem(KEY_SRC) === 'trade' ? 'trade' : 'vault';
+    const atTrade = path === '/trade.php';
+    // the last trade opened from the queue is taken to be the ghost trade, so the next trip goes straight to it
+    const ghostId = () => (/^\d+$/.test(localStorage.getItem(KEY_GHOST) || '') ? localStorage.getItem(KEY_GHOST) : '');
+    const toTrade = () => { location.href = 'https://www.torn.com/trade.php?fftrade=' + need(S) + (ghostId() ? '#step=view&ID=' + ghostId() : '#'); };
+    const toCash  = () => src() === 'trade' ? toTrade() : toVault();
+    if (atTrade) setInterval(() => {
+      const m = /[#&]step=view&ID=(\d+)/.exec(location.hash);
+      if (m && m[1] !== ghostId()) localStorage.setItem(KEY_GHOST, m[1]);
+    }, 500);
+
     function vaultStep() {
       if (withdrew || need(S) === 0) return (location.href = urlFor(S, S.i));
       const b = withdrawBtn();
@@ -672,11 +729,12 @@
     function step() {
       if (!S || sending) return;
       if (atVault) return vaultStep();
+      if (atTrade) return (location.href = urlFor(S, S.i));
       if (paid(S)) return next();
       if (wait() > 0) return;
       const it = S.q[S.i];
       if (!onPage(S)) return note('Press Open first - this is not the queue player.');
-      if (cash() < Number(it[1])) return toVault();
+      if (cash() < Number(it[1])) return toCash();
       const rfc = typeof window.getRFC === 'function' ? window.getRFC() : (document.cookie.match(/rfc_v=([^;]+)/) || [])[1];
       if (!rfc) return note("Could not find Torn's request token.");
 
@@ -741,10 +799,14 @@
     const grip     = handle('▼', '', 'position:absolute;top:4px;left:4px;cursor:pointer;font-size:16px;padding:4px 10px');
     const info     = document.createElement('span');
     info.style.cssText = 'flex:1 1 100%;text-align:center;font-size:14px';
+    grip.className = info.className = 'ffq-keep';
     const btnRow   = document.createElement('div');
     btnRow.style.cssText = 'display:flex;flex-wrap:nowrap;gap:8px;flex:1 1 100%;min-width:0';
     const sendBtn  = button('#15803d', step);
-    const vaultBtn = button('#ea580c', toVault);
+    const vaultBtn = button('#ea580c', toCash);
+    const srcBtn   = button('#374151', () => { localStorage.setItem(KEY_SRC, src() === 'trade' ? 'vault' : 'trade'); show(); });
+    const cashRow  = document.createElement('div');
+    cashRow.style.cssText = 'display:flex;flex-wrap:nowrap;gap:8px;flex:1 1 100%;min-width:0';
     const releaseBtn = button('#92400e', () => {
       const it = S.q[S.i];
       if (!it[4] || paid(S) || !confirm('Release [' + it[0] + '] from the support panel queue? This skips them without paying.')) return;
@@ -763,13 +825,15 @@
     keyBtn.title   = 'Click, then press the key you want for SEND / CONFIRM / NEXT';
     const stopBtn  = button('#7a1a1a', () => { localStorage.removeItem(KEY); S = null; panel.remove(); });
     stopBtn.textContent = '✕';
+    stopBtn.className = 'ffq-keep';
     stopBtn.style.cssText += ';position:absolute;top:4px;right:4px;padding:3px 10px;font-size:13px';
     // fixed proportions on one non-wrapping row: the label shrinks to fit instead of the button resizing
-    [[sendBtn, '3 1 0'], [nextBtn, '1.3 1 0'], [releaseBtn, '1 1 0'], [vaultBtn, '1 1 100%']].forEach(([b, f]) => {
+    [[sendBtn, '3 1 0'], [nextBtn, '1.3 1 0'], [releaseBtn, '1 1 0'], [vaultBtn, '3 1 0'], [srcBtn, '1.3 1 0']].forEach(([b, f]) => {
       b.style.cssText += ';box-sizing:border-box;flex:' + f + ';height:40px;padding:0 8px;white-space:nowrap;overflow:hidden;min-width:0;text-align:center';
     });
     btnRow.append(sendBtn, releaseBtn, nextBtn);
-    panel.append(grip, info, btnRow, vaultBtn, keyBtn, stopBtn);
+    cashRow.append(vaultBtn, srcBtn);
+    panel.append(grip, info, btnRow, cashRow, keyBtn, stopBtn);
 
     // PDA: tabs cannot message each other, so going back to the support panel through this link hands it the codes
     // of the payments already sent (in the #hash, never sent to a server); the next queue then leaves them out
@@ -784,7 +848,7 @@
       a.href = panelUrl();
       return a;
     };
-    if (isPDA) panel.append(backLink('Panel ↩', 'position:absolute;top:4px;left:44px'));
+    if (isPDA) { const pl = backLink('Panel ↩', 'position:absolute;top:4px;left:44px'); pl.className = 'ffq-keep'; panel.append(pl); }
     function finished() {
       if (!isPDA) return;
       const b = document.createElement('div');
@@ -793,36 +857,17 @@
       dockHost().prepend(b);
     }
 
-    // The ▼ / ▲ handle flips the panel between the top and bottom of the content; the choice is remembered.
-    let dock = 'top';
-    try { dock = (JSON.parse(localStorage.getItem(KEY_UI)) || {}).dock || 'top'; } catch (e) {}
-    const dockHost = () => document.querySelector('.content-wrapper') || document.getElementById('mainContainer') || document.body;
-    function dockPanel() {
-      const host = dockHost();
-      if (dock === 'top') { if (host.firstElementChild !== panel) host.prepend(panel); }
-      else if (host.lastElementChild !== panel) host.append(panel);
-    }
-    const gripLabel = () => {
-      grip.textContent = dock === 'top' ? '▼' : '▲';
-      grip.title = 'Move to the ' + (dock === 'top' ? 'bottom' : 'top') + ' of the page';
-    };
-    gripLabel();
-    grip.onclick = () => {
-      dock = dock === 'top' ? 'bottom' : 'top';
-      gripLabel();
-      localStorage.setItem(KEY_UI, JSON.stringify({ dock: dock }));
-      dockPanel();
-    };
-    dockPanel();
-    setInterval(() => { if (S && !panel.isConnected) dockPanel(); }, 500);   // Torn re-renders the page
+    dockPanel(panel, grip, () => S);
 
     function show() {
       if (!S) return;
       const it = S.q[S.i], here = onPage(S), n = need(S), amt = '$' + Number(it[1]).toLocaleString('en-US');
-      info.textContent = '#' + (S.i + 1) + '/' + S.q.length + ' · [' + it[0] + '] · ' + amt + (atVault ? ' · VAULT' : here ? '' : ' · ⚠ not on this player');
+      info.textContent = '#' + (S.i + 1) + '/' + S.q.length + ' · [' + it[0] + '] · ' + amt +
+        (atVault ? ' · VAULT' : atTrade ? ' · TRADE' + (n ? ' · take out $' + n.toLocaleString('en-US') : '') : here ? '' : ' · ⚠ not on this player');
 
       let text, bg;
       if (atVault)         { text = withdrew || !n ? 'BACK TO QUEUE ▶' : 'WITHDRAW $' + n.toLocaleString('en-US'); bg = withdrew || !n ? '#00ADB5' : '#ea580c'; }
+      else if (atTrade)    { text = n ? 'BACK TO QUEUE ▶ · still short $' + n.toLocaleString('en-US') : 'BACK TO QUEUE ▶'; bg = n ? '#4a4f57' : '#00ADB5'; }
       else if (paid(S))    { text = (S.r || []).indexOf(S.i) !== -1 ? 'RELEASED · NEXT ▶' : 'PAID ✓ · NEXT ▶'; bg = '#00ADB5'; }
       else if (sending)    { text = 'SENDING…';        bg = '#4a4f57'; }
       else if (wait() > 0) { text = 'WAIT ' + (Math.ceil(wait() / 100) / 10).toFixed(1) + 's'; bg = '#4a4f57'; }
@@ -830,16 +875,23 @@
       else                 { text = 'SEND ' + amt + ' → [' + it[0] + ']'; bg = '#15803d'; }
       sendBtn.textContent = text;
       sendBtn.style.background = bg;
-      sendBtn.style.display = here || atVault ? '' : 'none';
+      sendBtn.style.display = here || atVault || atTrade ? '' : 'none';
 
-      releaseBtn.style.display = it[4] && !paid(S) && !atVault ? '' : 'none';
-      vaultBtn.style.display = n > 0 && !atVault ? '' : 'none';
-      vaultBtn.textContent = 'VAULT $' + n.toLocaleString('en-US');
-      vaultBtn.title = 'Opens your vault with $' + n.toLocaleString('en-US') + ' pre-filled (cash the rest of the queue still needs)';
+      releaseBtn.style.display = it[4] && !paid(S) && !atVault && !atTrade ? '' : 'none';
+      // the vault / trade toggle is always on show, so the choice can be made before any cash runs short
+      cashRow.style.display = !atVault && !atTrade ? 'flex' : 'none';
+      vaultBtn.style.display = n > 0 ? '' : 'none';
+      const viaTrade = src() === 'trade';
+      vaultBtn.textContent = (viaTrade ? 'TRADE $' : 'VAULT $') + n.toLocaleString('en-US');
+      vaultBtn.title = viaTrade
+        ? 'Opens your ghost trade (the last trade you opened from the queue) to take out $' + n.toLocaleString('en-US') + ', the cash the rest of the queue still needs'
+        : 'Opens your vault with $' + n.toLocaleString('en-US') + ' pre-filled (cash the rest of the queue still needs)';
+      srcBtn.textContent = 'Cash from: ' + (viaTrade ? 'Trade' : 'Vault') + ' ⇄';
+      srcBtn.title = 'Click to take short cash from your ' + (viaTrade ? 'vault' : 'ghost trade') + ' instead. Remembered for every queue.';
 
       nextBtn.textContent = !here ? 'Open ▶' : (S.i === S.q.length - 1 ? 'Finish' : 'Next ▶');
       keyBtn.textContent  = capturing ? 'Press a key…' : 'Key: ' + keyName(getKey());
-      fit(sendBtn, 14); fit(nextBtn, 14); fit(vaultBtn, 14);
+      fit(sendBtn, 14); fit(nextBtn, 14); fit(vaultBtn, 14); fit(srcBtn, 14);
     }
 
     show();
@@ -848,7 +900,7 @@
 
   // ── messages.php: outreach mail queue (hit 1 send, hit 2 next mail). Torn allows one mail every 10 s ──
   function mailPanel() {
-    const KEY = 'ffscouter_mailq_v1', KEY_HK = 'ffscouter_hotkey_v1', KEY_UI = 'ffscouter_panel_ui_v1',
+    const KEY = 'ffscouter_mailq_v1', KEY_HK = 'ffscouter_hotkey_v1',
           KEY_LAST = 'ffscouter_maillast_v1', KEY_MAILED = 'ffscouter_mailed_v1';
     const MAIL_GAP   = 12000;   // Torn's 10 s between mails, plus 2 s spare
     const SETTLE_MS  = 1500;    // a mail is on screen this long before it can be sent, so a double press never sends it unseen
@@ -1070,6 +1122,7 @@
     const grip    = handle('▼', '', 'position:absolute;top:4px;left:4px;cursor:pointer;font-size:16px;padding:4px 10px');
     const info    = document.createElement('span');
     info.style.cssText = 'flex:1 1 100%;text-align:center;font-size:14px';
+    grip.className = info.className = 'ffq-keep';
     const btnRow  = document.createElement('div');
     btnRow.style.cssText = 'display:flex;flex-wrap:nowrap;gap:8px;flex:1 1 100%;min-width:0';
     const sendBtn = button('#15803d', step);
@@ -1079,6 +1132,7 @@
     keyBtn.title  = 'Click, then press the key you want for SEND / NEXT';
     const stopBtn = button('#7a1a1a', () => { localStorage.removeItem(KEY); S = null; panel.remove(); });
     stopBtn.textContent = '✕';
+    stopBtn.className = 'ffq-keep';
     stopBtn.style.cssText += ';position:absolute;top:4px;right:4px;padding:3px 10px;font-size:13px';
     [[sendBtn, '3 1 0'], [nextBtn, '1.3 1 0']].forEach(([b, f]) => {
       b.style.cssText += ';box-sizing:border-box;flex:' + f + ';height:40px;padding:0 8px;white-space:nowrap;overflow:hidden;min-width:0;text-align:center';
@@ -1098,7 +1152,7 @@
       a.href = panelUrl();
       return a;
     };
-    if (isPDA) panel.append(backLink('Panel ↩', 'position:absolute;top:4px;left:44px'));
+    if (isPDA) { const pl = backLink('Panel ↩', 'position:absolute;top:4px;left:44px'); pl.className = 'ffq-keep'; panel.append(pl); }
     function finished() {
       if (!isPDA) return;
       const b = document.createElement('div');
@@ -1107,28 +1161,7 @@
       dockHost().prepend(b);
     }
 
-    // same ▼ / ▲ dock as the payment queue, sharing its remembered choice
-    let dock = 'top';
-    try { dock = (JSON.parse(localStorage.getItem(KEY_UI)) || {}).dock || 'top'; } catch (e) {}
-    const dockHost = () => document.querySelector('.content-wrapper') || document.getElementById('mainContainer') || document.body;
-    function dockPanel() {
-      const host = dockHost();
-      if (dock === 'top') { if (host.firstElementChild !== panel) host.prepend(panel); }
-      else if (host.lastElementChild !== panel) host.append(panel);
-    }
-    const gripLabel = () => {
-      grip.textContent = dock === 'top' ? '▼' : '▲';
-      grip.title = 'Move to the ' + (dock === 'top' ? 'bottom' : 'top') + ' of the page';
-    };
-    gripLabel();
-    grip.onclick = () => {
-      dock = dock === 'top' ? 'bottom' : 'top';
-      gripLabel();
-      localStorage.setItem(KEY_UI, JSON.stringify({ dock: dock }));
-      dockPanel();
-    };
-    dockPanel();
-    setInterval(() => { if (S && !panel.isConnected) dockPanel(); }, 500);   // Torn re-renders the page
+    dockPanel(panel, grip, () => S);
 
     function show() {
       if (!S) return;
