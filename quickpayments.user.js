@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FFScouter - Profile Payment Pre-fill & Mail Pre-fill
 // @namespace    https://ffscouter.com/
-// @version      4.5
+// @version      4.6
 // @description  Pre-fills profile send-money (paymentamount, paymentref) and messages.php compose (mailsubject, mailbody). Added: FFScouter payment queue with a movable, resizable panel (two-step SEND by click or hotkey, delay between payments, VAULT shortfall button), item.php send pre-fill (e.g. Xanax), and a property ID / market price / happiness bar.
 // @author       FFScouter / Glasnost [1844049] & Solenya [4053619]
 // @match        https://www.torn.com/profiles.php*
@@ -254,14 +254,13 @@
 
 })();
 
-// ── Added features (the original script above is untouched) ──
 (function () {
   'use strict';
 
   const q    = new URLSearchParams(location.search);
   const path = location.pathname;
 
-  const VERSION    = '4.8';   // keep in sync with @version above
+  const VERSION    = '4.6';   // keep in sync with @version above
   const UPDATE_URL = 'https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js';   // empty = update check off
   const isPDA      = typeof window.flutter_inappwebview !== 'undefined' || /TornPDA/i.test(navigator.userAgent);
 
@@ -326,7 +325,7 @@
   // ── ffscouter.com: send pending payments to Torn as a queue ──
   function ffscouterSender() {
     const usable = () => [...document.querySelectorAll('#claimed-jobs .job-card[data-job-status="pending"] a[data-receiver-link]')]
-      .filter(a => { const p = new URL(a.href).searchParams; return p.get('XID') && p.get('paymentamount') && p.get('paymentref'); });
+      .filter(a => { const u = new URL(a.href), p = u.searchParams; return u.pathname === '/profiles.php' && p.get('XID') && p.get('paymentamount') && p.get('paymentref'); });   // profile pay links only, never a mail Compose link
 
     const jobId = a => {
       const card = a.closest('.job-card'), b = card && card.querySelector('[data-release]');
