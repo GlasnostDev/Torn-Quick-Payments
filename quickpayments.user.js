@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         FFScouter - Profile Payment Pre-fill & Mail Pre-fill
 // @namespace    https://ffscouter.com/
-// @version      4.7
-// @description  Pre-fills profile send-money (paymentamount, paymentref) and messages.php compose (mailsubject, mailbody). Added: FFScouter payment queue with a movable, resizable panel (two-step SEND by click or hotkey, delay between payments, VAULT shortfall button), item.php send pre-fill (e.g. Xanax), and a property ID / market price / happiness bar.
+// @version      4.8
+// @description  Pre-fills profile send-money (paymentamount, paymentref) and messages.php compose (mailsubject, mailbody). Added: FFScouter payment queue with a movable, resizable panel (two-step SEND by click or hotkey, delay between payments, VAULT shortfall button), item.php send pre-fill (e.g. Xanax), a property ID / market price / happiness bar, and an outreach mail queue (loss-buy-marketing to Torn compose, 10 s gap between mails).
 // @author       FFScouter / Glasnost [1844049] & Solenya [4053619]
 // @match        https://www.torn.com/profiles.php*
 // @match        https://www.torn.com/messages.php*
@@ -254,14 +254,14 @@
 
 })();
 
-// SOLENYA ADDITIONS // 
+// SOLENYA ADDITIONS //
 (function () {
   'use strict';
 
   const q    = new URLSearchParams(location.search);
   const path = location.pathname;
 
-  const VERSION    = '4.7';   // keep in sync with @version above
+  const VERSION    = '5.9';   // keep in sync with @version above
   const UPDATE_URL = 'https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js';   // empty = update check off
   const isPDA      = typeof window.flutter_inappwebview !== 'undefined' || /TornPDA/i.test(navigator.userAgent);
 
@@ -318,10 +318,37 @@
     ['input', 'keyup', 'change', 'blur'].forEach(t => el.dispatchEvent(new Event(t, { bubbles: true })));
   }
 
-  if (/(^|\.)ffscouter\.com$/.test(location.hostname)) return ffscouterSender();
+  // ── shared by the payment and mail queue panels ──
+  const keyName = c => ({ ArrowRight: '→', ArrowLeft: '←', ArrowUp: '↑', ArrowDown: '↓' }[c] || c.replace(/^(Key|Digit)/, ''));
+  const strip   = t => String(t || '').replace(/<[^>]*>/g, '').trim();
+  const button = (bg, fn) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.style.cssText = 'background:' + bg + ';color:#fff;border:0;border-radius:6px;padding:10px 14px;font:bold 14px Arial,sans-serif;cursor:pointer';
+    b.addEventListener('click', e => { if (e.isTrusted) fn(); });
+    return b;
+  };
+  const handle = (text, title, css) => {
+    const s = document.createElement('span');
+    s.textContent = text;
+    s.title = title;
+    s.style.cssText = 'color:#9aa7b2;user-select:none;-webkit-user-select:none;touch-action:none;' + css;
+    return s;
+  };
+  function fit(b, max) {
+    if (b._fitText === b.textContent && b._fitW === b.clientWidth) return;
+    b._fitText = b.textContent;
+    let size = max;
+    b.style.fontSize = size + 'px';
+    while (b.clientWidth && b.scrollWidth > b.clientWidth && size > 8) b.style.fontSize = --size + 'px';
+    b._fitW = b.clientWidth;
+  }
+
+  if (/(^|\.)ffscouter\.com$/.test(location.hostname)) return /\/loss-buy-marketing\/?$/.test(path) ? outreachSender() : ffscouterSender();
   if (path === '/properties.php') { propertiesPage(); if (q.has('ffvault')) queuePanel(); return; }
   if (path === '/item.php')       return itemPrefill().catch(e => console.error('[FFScouter item]', e));
   if (path === '/profiles.php')   return queuePanel();
+  if (path === '/messages.php')   return mailPanel();
 
   // ── ffscouter.com: send pending payments to Torn as a queue ──
   function ffscouterSender() {
@@ -334,15 +361,26 @@
       Object.keys(l).forEach(k => { if (Date.now() - l[k] > SENT_TTL) delete l[k]; });
       return l;
     };
+    // keyed by the payment's code (the LP-… first word of its message), which is unique per job
+    const code = ref => String(ref).trim().split(/\s+/)[0];
+    const remember = pairs => {
+      const l = sentLedger();
+      pairs.forEach(([c, t]) => { if (/^[\w-]+$/.test(c) && t > 0) l[c] = Math.min(t, Date.now()); });
+      try { localStorage.setItem(KEY_SENT, JSON.stringify(l)); } catch (err) {}
+    };
     window.addEventListener('message', e => {
       if (e.origin !== 'https://www.torn.com' || !e.data || !Array.isArray(e.data.ffSent)) return;
-      const l = sentLedger();
-      e.data.ffSent.forEach(r => { if (typeof r[0] === 'string' && Number(r[1]) > 0) l[r[0].trim()] = Math.min(Number(r[1]), Date.now()); });
-      try { localStorage.setItem(KEY_SENT, JSON.stringify(l)); } catch (err) {}
+      remember(e.data.ffSent.filter(r => typeof r[0] === 'string').map(r => [code(r[0]), Number(r[1])]));
     });
+    // PDA: tabs cannot message each other, so the Torn panel's "Panel ↩" link carries the sent codes in the #hash
+    const hm = /(?:^#|&)ffsent=([^&]*)/.exec(location.hash);
+    if (hm) {
+      remember(decodeURIComponent(hm[1]).split(',').filter(Boolean).map(c => [c, Date.now()]));
+      history.replaceState(null, '', location.pathname + location.search);
+    }
 
     const usable = () => { const l = sentLedger(); return [...document.querySelectorAll('#claimed-jobs .job-card[data-job-status="pending"] a[data-receiver-link]')]
-      .filter(a => { const u = new URL(a.href), p = u.searchParams; return u.pathname === '/profiles.php' && p.get('XID') && p.get('paymentamount') && p.get('paymentref') && !l[p.get('paymentref').trim()]; }); };   // profile pay links only, never a mail Compose link
+      .filter(a => { const u = new URL(a.href), p = u.searchParams; return u.pathname === '/profiles.php' && p.get('XID') && p.get('paymentamount') && p.get('paymentref') && !l[code(p.get('paymentref'))]; }); };   // profile pay links only, never a mail Compose link
 
     const jobId = a => {
       const card = a.closest('.job-card'), b = card && card.querySelector('[data-release]');
@@ -398,6 +436,83 @@
     const refresh = () => {
       const n = usable().length;
       btn.textContent   = n ? 'Send ' + n + ' to Torn queue' : 'No pending payments';
+      btn.disabled      = !n;
+      btn.style.opacity = n ? '1' : '0.5';
+    };
+    setInterval(refresh, 1000);
+    refresh();
+
+    btn.addEventListener('click', () => { if (usable().length) window.open(queueUrl(), '_blank'); });
+  }
+
+  // ── ffscouter.com loss-buy-marketing: send the claimed outreach mails to Torn as a queue ──
+  function outreachSender() {
+    // mails the Torn queue tab reported as sent (by the row's data-compose-assign id); left out of the next queue
+    const KEY_MAILED = 'ffscouter_mailed_v1', MAILED_TTL = 7 * 24 * 3600 * 1000;
+    const mailedLedger = () => {
+      let l = {};
+      try { l = JSON.parse(localStorage.getItem(KEY_MAILED)) || {}; } catch (e) {}
+      Object.keys(l).forEach(k => { if (Date.now() - l[k] > MAILED_TTL) delete l[k]; });
+      return l;
+    };
+    const remember = pairs => {
+      const l = mailedLedger();
+      pairs.forEach(([id, t]) => { if (/^\d+$/.test(id) && t > 0) l[id] = Math.min(t, Date.now()); });
+      try { localStorage.setItem(KEY_MAILED, JSON.stringify(l)); } catch (err) {}
+    };
+    window.addEventListener('message', e => {
+      if (e.origin !== 'https://www.torn.com' || !e.data || !Array.isArray(e.data.ffMailed)) return;
+      remember(e.data.ffMailed.map(r => [String(r[0]), Number(r[1])]));
+    });
+    // PDA: the Torn panel's "Panel ↩" link carries the sent ids in the #hash
+    const hm = /(?:^#|&)ffmailed=([^&]*)/.exec(location.hash);
+    if (hm) {
+      remember(decodeURIComponent(hm[1]).split(',').filter(Boolean).map(id => [id, Date.now()]));
+      history.replaceState(null, '', location.pathname + location.search);
+    }
+
+    // [XID, name, subject, html body, assign id] from a row's pre-filled Torn compose link
+    const row = a => {
+      try {
+        const u = new URL(a.href);
+        if (u.hostname !== 'www.torn.com' || u.pathname !== '/messages.php') return null;
+        const p = new URLSearchParams(u.hash.slice(u.hash.indexOf('&') + 1));
+        const x = p.get('XID'), s = p.get('mailsubject'), b = p.get('mailbody');
+        return /^\d+$/.test(x || '') && s && b ? [x, a.textContent.replace(/\s*\[\d+\]\s*$/, '').trim(), s, b, a.dataset.composeAssign] : null;
+      } catch (e) { return null; }
+    };
+    // claimed rows only: the "Clicked" list below has no data-compose-assign and is never queued
+    const links  = () => [...document.querySelectorAll('#outreach-rows a[data-compose-assign]')]
+      .filter(a => !a.closest('#outreach-clicked-wrap') && /^\d+$/.test(a.dataset.composeAssign));
+    const usable = () => { const l = mailedLedger(); return links().filter(a => !l[a.dataset.composeAssign]).map(row).filter(Boolean); };
+
+    function queueUrl() {
+      const queue = usable();
+      const b64 = btoa(unescape(encodeURIComponent(JSON.stringify({ q: queue }))));
+      // the queue rides in the #hash, which never reaches a server; the first mail's compose page opens with its recipient
+      return 'https://www.torn.com/messages.php?ffmail=0#/p=compose&XID=' + queue[0][0] + '&ffm=' + encodeURIComponent(b64);
+    }
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;background:#ea580c;color:#fff;border:0;border-radius:6px;padding:10px 14px;font:bold 14px Arial,sans-serif;cursor:pointer';
+    document.body.appendChild(btn);
+
+    const refresh = () => {
+      const l = mailedLedger();
+      // dim the rows already mailed from this browser (the panel counts them once Torn's logs confirm)
+      links().forEach(a => {
+        const box = a.closest('.border') || a.parentElement;
+        if (!l[a.dataset.composeAssign] || box.dataset.ffMailed) return;
+        box.dataset.ffMailed = '1';
+        box.style.opacity = '0.45';
+        const tag = document.createElement('span');
+        tag.textContent = 'Mailed ✓';
+        tag.style.cssText = 'margin-left:8px;color:#22c55e;font-size:12px';
+        a.after(tag);
+      });
+      const n = usable().length;
+      btn.textContent   = n ? 'Send ' + n + ' mail' + (n > 1 ? 's' : '') + ' to Torn queue' : 'No mails to send';
       btn.disabled      = !n;
       btn.style.opacity = n ? '1' : '0.5';
     };
@@ -479,15 +594,9 @@
         skipped = rows.length - fresh.length;
         if (fresh.length) save({ q: fresh, s: p.s || '', i: 0, d: [] });
         else localStorage.removeItem(KEY);
-        // the queue link lands on the panel's first job; if that one was just left out, go straight to the first
-        // unpaid queue entry (with its pre-fill); with none left, stay here - the link carries no pre-fill
-        const here = q.get('XID'), f = fresh[0];
-        if (f && f[0] !== here) {
-          location.replace('/profiles.php?XID=' + f[0] + '&paymentamount=' + f[1] + '&paymentref=' +
-            encodeURIComponent(String(f[2]).replace('§', () => p.s || '')) + (f[3] ? '&anonymous=1' : '') +
-            (skipped ? '&ffskip=' + skipped : ''));
-          return;
-        }
+        // the queue link lands on the panel's first job with no pre-fill. If Torn knows that one is already paid,
+        // the panel shows "not on this player" and its Open button takes you to the first unpaid player: one click,
+        // one page load - nothing is loaded on Torn without your input
         const u = new URL(location.href);
         u.searchParams.delete('ffq');
         history.replaceState(null, '', u);
@@ -511,7 +620,6 @@
     const onPage = s => q.get('XID') === s.q[s.i][0];
     const cash   = () => { const el = document.getElementById('user-money'); return el ? Number(el.dataset.money) : NaN; };
     const wait   = () => Math.max(0, Number(localStorage.getItem(KEY_LAST) || 0) + SEND_GAP - Date.now());
-    const strip  = t => String(t || '').replace(/<[^>]*>/g, '').trim();
 
     function need(s) {
       if (paid(s)) return 0;   // sidebar cash may not be updated yet
@@ -556,7 +664,7 @@
     }
 
     function next() {
-      if (S.i >= S.q.length - 1) { localStorage.removeItem(KEY); S = null; panel.remove(); return; }
+      if (S.i >= S.q.length - 1) { localStorage.removeItem(KEY); S = null; panel.remove(); finished(); return; }
       S.i++; save(S);
       location.href = urlFor(S, S.i);
     }
@@ -595,7 +703,6 @@
     }
 
     const getKey  = () => localStorage.getItem(KEY_HK) || 'ArrowRight';
-    const keyName = c => ({ ArrowRight: '→', ArrowLeft: '←', ArrowUp: '↑', ArrowDown: '↓' }[c] || c.replace(/^(Key|Digit)/, ''));
     let held = false, capturing = false;
 
     document.addEventListener('keydown', e => {
@@ -625,21 +732,6 @@
         show();
       }, true);
     }
-
-    const button = (bg, fn) => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.style.cssText = 'background:' + bg + ';color:#fff;border:0;border-radius:6px;padding:10px 14px;font:bold 14px Arial,sans-serif;cursor:pointer';
-      b.addEventListener('click', e => { if (e.isTrusted) fn(); });
-      return b;
-    };
-    const handle = (text, title, css) => {
-      const s = document.createElement('span');
-      s.textContent = text;
-      s.title = title;
-      s.style.cssText = 'color:#9aa7b2;user-select:none;-webkit-user-select:none;touch-action:none;' + css;
-      return s;
-    };
 
     const panel = document.createElement('div');
     panel.id = 'ffq-panel';
@@ -676,16 +768,30 @@
     [[sendBtn, '3 1 0'], [nextBtn, '1.3 1 0'], [releaseBtn, '1 1 0'], [vaultBtn, '1 1 100%']].forEach(([b, f]) => {
       b.style.cssText += ';box-sizing:border-box;flex:' + f + ';height:40px;padding:0 8px;white-space:nowrap;overflow:hidden;min-width:0;text-align:center';
     });
-    function fit(b, max) {
-      if (b._fitText === b.textContent && b._fitW === b.clientWidth) return;
-      b._fitText = b.textContent;
-      let size = max;
-      b.style.fontSize = size + 'px';
-      while (b.clientWidth && b.scrollWidth > b.clientWidth && size > 8) b.style.fontSize = --size + 'px';
-      b._fitW = b.clientWidth;
-    }
     btnRow.append(sendBtn, releaseBtn, nextBtn);
     panel.append(grip, info, btnRow, vaultBtn, keyBtn, stopBtn);
+
+    // PDA: tabs cannot message each other, so going back to the support panel through this link hands it the codes
+    // of the payments already sent (in the #hash, never sent to a server); the next queue then leaves them out
+    const panelUrl = () => 'https://ffscouter.com/supportpanel/payment-provider#ffsent=' +
+      encodeURIComponent(Object.keys(sentLedger()).map(k => k.split(/\s+/)[0]).join(','));
+    const backLink = (text, css) => {
+      const a = document.createElement('a');
+      a.textContent = text;
+      a.title = 'Back to the support panel; payments sent here are left out of the next queue';
+      a.style.cssText = 'color:#fff;background:#374151;border-radius:6px;text-decoration:none;font:bold 13px Arial,sans-serif;padding:4px 10px;' + css;
+      a.addEventListener('click', () => { a.href = panelUrl(); });
+      a.href = panelUrl();
+      return a;
+    };
+    if (isPDA) panel.append(backLink('Panel ↩', 'position:absolute;top:4px;left:44px'));
+    function finished() {
+      if (!isPDA) return;
+      const b = document.createElement('div');
+      b.style.cssText = 'margin:8px 0;padding:10px;text-align:center;background:#14532d;color:#d1fae5;border:1px solid #22c55e;border-radius:6px;font:bold 14px Arial,sans-serif';
+      b.append('Queue finished ✓ ', backLink('Back to panel ↩', 'margin-left:8px'));
+      dockHost().prepend(b);
+    }
 
     // The ▼ / ▲ handle flips the panel between the top and bottom of the content; the choice is remembered.
     let dock = 'top';
@@ -736,6 +842,319 @@
       fit(sendBtn, 14); fit(nextBtn, 14); fit(vaultBtn, 14);
     }
 
+    show();
+    setInterval(show, 250);
+  }
+
+  // ── messages.php: outreach mail queue (hit 1 send, hit 2 next mail). Torn allows one mail every 10 s ──
+  function mailPanel() {
+    const KEY = 'ffscouter_mailq_v1', KEY_HK = 'ffscouter_hotkey_v1', KEY_UI = 'ffscouter_panel_ui_v1',
+          KEY_LAST = 'ffscouter_maillast_v1', KEY_MAILED = 'ffscouter_mailed_v1';
+    const MAIL_GAP   = 12000;   // Torn's 10 s between mails, plus 2 s spare
+    const SETTLE_MS  = 1500;    // a mail is on screen this long before it can be sent, so a double press never sends it unseen
+    const CONFIRM_MS = 8000;    // no answer from Torn by then: counted as sent (unconfirmed), never sent twice
+    const MAILED_TTL = 7 * 24 * 3600 * 1000;
+
+    const load = () => {
+      try {
+        const s = JSON.parse(localStorage.getItem(KEY));
+        return s && s.i < s.q.length && Date.now() - s.t < 12 * 3600 * 1000 ? s : null;
+      } catch (e) { return null; }
+    };
+    const save = s => { s.t = Date.now(); try { localStorage.setItem(KEY, JSON.stringify(s)); } catch (e) {} };
+
+    const mailedLedger = () => {
+      let l = {};
+      try { l = JSON.parse(localStorage.getItem(KEY_MAILED)) || {}; } catch (e) {}
+      Object.keys(l).forEach(k => { if (Date.now() - l[k] > MAILED_TTL) delete l[k]; });
+      return l;
+    };
+    // tell the marketing page that opened this queue (if it is still open) which mails are sent
+    const tellPanel = l => {
+      const data = { ffMailed: Object.keys(l).map(k => [k, l[k]]) };
+      if (!data.ffMailed.length || !window.opener) return;
+      ['https://ffscouter.com', 'https://www.ffscouter.com'].forEach(o => { try { window.opener.postMessage(data, o); } catch (e) {} });
+    };
+    const markMailed = id => {
+      if (!/^\d+$/.test(id || '')) return;
+      const l = mailedLedger(); l[id] = Date.now();
+      try { localStorage.setItem(KEY_MAILED, JSON.stringify(l)); } catch (e) {}
+      tellPanel(l);
+    };
+    tellPanel(mailedLedger());
+
+    const hp = new URLSearchParams(location.hash.indexOf('&') < 0 ? '' : location.hash.slice(location.hash.indexOf('&') + 1));
+    const pageXID = hp.get('XID');
+    let skipped = 0;
+    if (hp.get('ffm')) {
+      try {
+        const p = JSON.parse(decodeURIComponent(escape(atob(hp.get('ffm')))));
+        const l = mailedLedger();
+        const rows = p.q.filter(r => /^\d+$/.test(r[0]) && r[2] && r[3]);
+        const fresh = rows.filter(r => !l[r[4]]);
+        skipped = rows.length - fresh.length;
+        if (fresh.length) save({ q: fresh, i: 0, d: [], u: [] });
+        else localStorage.removeItem(KEY);
+        history.replaceState(null, '', location.pathname + location.search + '#/p=compose&XID=' + pageXID);
+      } catch (e) { console.warn('[FFScouter] Could not read mail queue from URL', e); }
+    }
+
+    function note(text, ok) {
+      const old = document.getElementById('ffq-note');
+      if (old) old.remove();
+      const n = document.createElement('div');
+      n.id = 'ffq-note';
+      n.textContent = text;
+      n.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);z-index:2147483647;border-radius:6px;padding:8px 12px;font:bold 13px Arial,sans-serif;max-width:92vw;text-align:center;border:1px solid;bottom:' + (isPDA ? '84px' : '24px') + ';' +
+        (ok ? 'background:#14532d;color:#d1fae5;border-color:#22c55e' : 'background:#7a1a1a;color:#f8d7da;border-color:#e05555');
+      n.onclick = () => n.remove();
+      document.body.appendChild(n);
+      setTimeout(() => n.remove(), 6000);
+    }
+    if (skipped) note(skipped + ' mail' + (skipped > 1 ? 's' : '') + ' already sent from this browser - left out of the queue.', true);
+
+    let S = load();
+    if (!S) return;
+
+    const urlFor = k => '/messages.php?ffmail=' + k + '#/p=compose&XID=' + S.q[k][0];
+    const sent   = () => S.d.indexOf(S.i) !== -1;
+    const onPage = () => q.get('ffmail') === String(S.i) && pageXID === S.q[S.i][0];
+    const wait   = () => Math.max(0, Number(localStorage.getItem(KEY_LAST) || 0) + MAIL_GAP - Date.now());
+    const subj   = () => document.querySelector('input[name="subject"]');
+    const filled = () => filledAt && subj() && subj().value === S.q[S.i][2];
+
+    // Torn's own Send button in the compose form (the queue presses it for you: one key press, one mail)
+    function sendButton() {
+      for (let r = subj(), k = 0; r && k < 10; r = r.parentElement, k++) {
+        const b = [...r.querySelectorAll('button, input[type="submit"], input[type="button"]')]
+          .find(x => !panel.contains(x) && /^\s*send\b/i.test(x.value || x.textContent) && x.offsetParent !== null);
+        if (b) return b;
+      }
+      return null;
+    }
+
+    let filledAt = 0, sending = false, sendAt = 0, verdict = null;
+
+    // a send is clicked and the page reloaded before its answer came back (Torn posted the form): count it, never resend
+    if (S.p && S.p.i === S.i && Date.now() - S.p.t < 60000 && !sent()) {
+      S.d.push(S.i); S.u.push(S.i); markMailed(S.q[S.i][4]);
+      note('Mail to ' + S.q[S.i][1] + ' counted as sent - check your Sent mail if unsure.', true);
+    }
+    delete S.p; save(S);
+
+    function fill() {
+      const it = S.q[S.i];
+      let tries = 0;
+      const t = setInterval(() => {
+        if (!S || ++tries > 150) { clearInterval(t); if (S && !filledAt) note('Compose form not found - press Open to reload this mail.'); return; }
+        if (!location.hash.includes('p=compose')) { const tab = document.querySelector('a[href="#/p=compose"]'); if (tab) tab.click(); return; }
+        const ed = typeof tinymce !== 'undefined' ? tinymce.activeEditor : null;
+        if (!subj() || !ed || !ed.getBody || !ed.getBody()) return;   // compose form / editor not ready yet
+        clearInterval(t);
+        setValue(subj(), it[2]);
+        ed.setContent(it[3]);
+        // focus in the editor or a field would swallow the hotkey
+        const a = document.activeElement;
+        if (a && a !== document.body && a.blur) a.blur();
+        filledAt = Date.now();
+        show();
+      }, 150);
+    }
+
+    // Torn's answer to the send: its JSON reply, a message that appears on the page, or the form clearing
+    const callSeen = (url, text) => {
+      if (!sending || verdict || !/messages\.php/.test(url || '')) return;
+      let j;
+      try { j = JSON.parse(text); } catch (e) { return; }
+      if (j && (j.success === false || j.error)) verdict = { ok: false, text: strip(j.text || j.msg || j.error) };
+      else if (j && j.success === true) verdict = { ok: true, text: strip(j.text || j.msg) };
+    };
+    const xhrOpen = XMLHttpRequest.prototype.open, xhrSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function (m, u) { this._ffUrl = String(u); return xhrOpen.apply(this, arguments); };
+    XMLHttpRequest.prototype.send = function () {
+      this.addEventListener('load', () => callSeen(this._ffUrl, this.responseText));
+      return xhrSend.apply(this, arguments);
+    };
+    const nativeFetch = window.fetch;
+    window.fetch = function (input) {
+      const url = typeof input === 'string' ? input : input && input.url;
+      return nativeFetch.apply(this, arguments).then(r => { r.clone().text().then(t => callSeen(url, t)).catch(() => {}); return r; });
+    };
+    new MutationObserver(ms => {
+      if (!sending || verdict) return;
+      for (const m of ms) for (const n of m.addedNodes) {
+        const el = n.nodeType === 1 ? n : n.parentNode;
+        if (!el || panel.contains(el) || (el.closest && el.closest('#ffq-note'))) continue;
+        const t = strip(n.nodeType === 1 ? n.innerText || n.textContent : n.textContent);
+        if (!t || t.length > 300) continue;
+        if (/\b(not|n't)( been)? sent\b/i.test(t) || (!/\bsent\b/i.test(t) && /\b(wait|too (fast|quickly)|error|cannot|can't|unable|not allowed|failed|invalid)\b/i.test(t))) { verdict = { ok: false, text: t }; return; }
+        if (/\bsent\b/i.test(t)) { verdict = { ok: true, text: t }; return; }
+      }
+    }).observe(document.body, { childList: true, subtree: true });
+
+    function watchSend() {
+      const el = Date.now() - sendAt, s = subj();
+      if (!verdict && el > 1500 && (!s || s.value !== S.q[S.i][2])) verdict = { ok: true, text: '' };   // Torn cleared the form
+      if (!verdict && el > CONFIRM_MS) verdict = { ok: true, unsure: true };
+      if (!verdict) return;
+      const v = verdict, it = S.q[S.i], last = S.i === S.q.length - 1;
+      verdict = null; sending = false; delete S.p;
+      if (v.ok) {
+        S.d.push(S.i); if (v.unsure) S.u.push(S.i);
+        markMailed(it[4]); save(S);
+        note((v.unsure ? 'Torn did not confirm the mail to ' + it[1] + ' - check your Sent mail before mailing them again.' : (v.text || 'Mail sent ✓')) +
+             (last ? ' · Queue finished ✓' : ''), !v.unsure);
+        if (last) finish();
+      } else { save(S); note(v.text || 'Torn did not send the mail.'); }
+    }
+
+    function open() { if (!sending) location.href = urlFor(S.i); }
+    function finish() { localStorage.removeItem(KEY); S = null; panel.remove(); finished(); }
+    function next() {
+      if (sending) return;
+      if (S.i >= S.q.length - 1) return finish();
+      S.i++; save(S);
+      open();
+    }
+
+    function step() {
+      if (!S || sending) return;
+      if (sent()) return next();
+      if (!onPage()) return open();
+      if (wait() > 0 || !filled() || Date.now() - filledAt < SETTLE_MS) return;   // Torn's 10 s gap / mail still loading
+      const b = sendButton();
+      if (!b) return note("Torn's Send button was not found.");
+      if (b.disabled) return note("Torn's Send button is disabled - wait for its countdown.");
+      sending = true; sendAt = Date.now(); verdict = null;
+      localStorage.setItem(KEY_LAST, sendAt);
+      S.p = { i: S.i, t: sendAt }; save(S);
+      b.click();
+      show();
+    }
+
+    const getKey = () => localStorage.getItem(KEY_HK) || 'ArrowRight';
+    let held = false, capturing = false;
+
+    document.addEventListener('keydown', e => {
+      if (capturing || e.code !== getKey()) return;
+      if (e.repeat || held) return;   // a held key never repeats
+      held = true;
+      const a = document.activeElement || {};
+      if (!e.isTrusted || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+      if (/^(INPUT|TEXTAREA|SELECT|IFRAME)$/.test(a.tagName) || a.isContentEditable) return;
+      e.preventDefault();
+      step();
+    }, true);
+    document.addEventListener('keyup', e => { if (e.code === getKey()) held = false; }, true);
+    window.addEventListener('blur', () => { held = false; });
+
+    function chooseKey() {
+      capturing = true;
+      show();
+      document.addEventListener('keydown', function pick(e) {
+        if (/^(Shift|Control|Alt|Meta)$/.test(e.key)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        document.removeEventListener('keydown', pick, true);
+        if (e.key !== 'Escape') localStorage.setItem(KEY_HK, e.code);
+        held = e.key !== 'Escape';
+        capturing = false;
+        show();
+      }, true);
+    }
+
+    const panel = document.createElement('div');
+    panel.id = 'ffq-panel';
+    panel.style.cssText = 'position:relative;box-sizing:border-box;display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:8px;width:auto;margin:8px 0;background:#1f2933;color:#e6e6e6;border:1px solid #4a4f57;border-radius:6px;padding:34px 10px 10px;font:bold 13px Arial,sans-serif';
+
+    const grip    = handle('▼', '', 'position:absolute;top:4px;left:4px;cursor:pointer;font-size:16px;padding:4px 10px');
+    const info    = document.createElement('span');
+    info.style.cssText = 'flex:1 1 100%;text-align:center;font-size:14px';
+    const btnRow  = document.createElement('div');
+    btnRow.style.cssText = 'display:flex;flex-wrap:nowrap;gap:8px;flex:1 1 100%;min-width:0';
+    const sendBtn = button('#15803d', step);
+    const nextBtn = button('#00ADB5', () => onPage() ? next() : open());
+    const keyBtn  = button('#374151', chooseKey);
+    if (isPDA) keyBtn.style.display = 'none';   // no keyboard shortcuts on PDA
+    keyBtn.title  = 'Click, then press the key you want for SEND / NEXT';
+    const stopBtn = button('#7a1a1a', () => { localStorage.removeItem(KEY); S = null; panel.remove(); });
+    stopBtn.textContent = '✕';
+    stopBtn.style.cssText += ';position:absolute;top:4px;right:4px;padding:3px 10px;font-size:13px';
+    [[sendBtn, '3 1 0'], [nextBtn, '1.3 1 0']].forEach(([b, f]) => {
+      b.style.cssText += ';box-sizing:border-box;flex:' + f + ';height:40px;padding:0 8px;white-space:nowrap;overflow:hidden;min-width:0;text-align:center';
+    });
+    btnRow.append(sendBtn, nextBtn);
+    panel.append(grip, info, btnRow, keyBtn, stopBtn);
+
+    // PDA: tabs cannot message each other, so this link hands the marketing page the ids of the mails sent (in the #hash)
+    const panelUrl = () => 'https://ffscouter.com/supportpanel/payment-provider/loss-buy-marketing#ffmailed=' +
+      encodeURIComponent(Object.keys(mailedLedger()).join(','));
+    const backLink = (text, css) => {
+      const a = document.createElement('a');
+      a.textContent = text;
+      a.title = 'Back to the marketing page; mails sent here are left out of the next queue';
+      a.style.cssText = 'color:#fff;background:#374151;border-radius:6px;text-decoration:none;font:bold 13px Arial,sans-serif;padding:4px 10px;' + css;
+      a.addEventListener('click', () => { a.href = panelUrl(); });
+      a.href = panelUrl();
+      return a;
+    };
+    if (isPDA) panel.append(backLink('Panel ↩', 'position:absolute;top:4px;left:44px'));
+    function finished() {
+      if (!isPDA) return;
+      const b = document.createElement('div');
+      b.style.cssText = 'margin:8px 0;padding:10px;text-align:center;background:#14532d;color:#d1fae5;border:1px solid #22c55e;border-radius:6px;font:bold 14px Arial,sans-serif';
+      b.append('Mail queue finished ✓ ', backLink('Back to panel ↩', 'margin-left:8px'));
+      dockHost().prepend(b);
+    }
+
+    // same ▼ / ▲ dock as the payment queue, sharing its remembered choice
+    let dock = 'top';
+    try { dock = (JSON.parse(localStorage.getItem(KEY_UI)) || {}).dock || 'top'; } catch (e) {}
+    const dockHost = () => document.querySelector('.content-wrapper') || document.getElementById('mainContainer') || document.body;
+    function dockPanel() {
+      const host = dockHost();
+      if (dock === 'top') { if (host.firstElementChild !== panel) host.prepend(panel); }
+      else if (host.lastElementChild !== panel) host.append(panel);
+    }
+    const gripLabel = () => {
+      grip.textContent = dock === 'top' ? '▼' : '▲';
+      grip.title = 'Move to the ' + (dock === 'top' ? 'bottom' : 'top') + ' of the page';
+    };
+    gripLabel();
+    grip.onclick = () => {
+      dock = dock === 'top' ? 'bottom' : 'top';
+      gripLabel();
+      localStorage.setItem(KEY_UI, JSON.stringify({ dock: dock }));
+      dockPanel();
+    };
+    dockPanel();
+    setInterval(() => { if (S && !panel.isConnected) dockPanel(); }, 500);   // Torn re-renders the page
+
+    function show() {
+      if (!S) return;
+      if (sending) watchSend();
+      if (!S) return;
+      const it = S.q[S.i], here = onPage();
+      info.textContent = 'Mail #' + (S.i + 1) + '/' + S.q.length + ' · ' + it[1] + ' [' + it[0] + ']' + (here ? '' : ' · ⚠ not open');
+
+      let text, bg;
+      if (sent())               { text = 'SENT ✓ · NEXT ▶'; bg = '#00ADB5'; }
+      else if (!here)           { text = 'OPEN MAIL ▶';     bg = '#00ADB5'; }
+      else if (sending)         { text = 'SENDING…';        bg = '#4a4f57'; }
+      else if (wait() > 0)      { text = 'WAIT ' + (Math.ceil(wait() / 100) / 10).toFixed(1) + 's'; bg = '#4a4f57'; }
+      else if (!filled())       { text = 'FILLING…';        bg = '#4a4f57'; }
+      else if (Date.now() - filledAt < SETTLE_MS) { text = 'CHECK MAIL…'; bg = '#4a4f57'; }
+      else                      { text = 'SEND MAIL → ' + it[1]; bg = '#15803d'; }
+      sendBtn.textContent = text;
+      sendBtn.style.background = bg;
+
+      nextBtn.textContent = !here ? 'Open ▶' : (S.i === S.q.length - 1 ? 'Finish' : 'Next ▶');
+      nextBtn.style.opacity = sending ? '0.5' : '1';
+      keyBtn.textContent  = capturing ? 'Press a key…' : 'Key: ' + keyName(getKey());
+      fit(sendBtn, 14); fit(nextBtn, 14);
+    }
+
+    if (onPage() && !sent()) fill();
     show();
     setInterval(show, 250);
   }
@@ -816,6 +1235,11 @@
       .find(li => visible(li) && !li.closest('[class*="quick" i], [id*="quick" i]') && li.querySelector('.option-send, button[class*="send"]'));
 
     let li = await waitFor(itemRow, 2500);
+    // not on the open tab: open the Drugs tab once (Xanax and friends); any other category you open yourself
+    if (!li) {
+      const drugs = document.querySelector('a.drugs-category-icon');
+      if (drugs && visible(drugs)) { drugs.click(); li = await waitFor(itemRow, 2500); }
+    }
     if (!li) {
       toast('Open the inventory tab that has the item. The Send form fills in as soon as it shows up.');
       li = await waitFor(itemRow, 120000);
