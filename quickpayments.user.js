@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FFScouter - Profile Payment Pre-fill & Mail Pre-fill
 // @namespace    https://ffscouter.com/
-// @version      4.9
+// @version      5.0
 // @description  Pre-fills profile send-money (paymentamount, paymentref) and messages.php compose (mailsubject, mailbody). Added: FFScouter payment queue with a movable, resizable panel (two-step SEND by click or hotkey, delay between payments, VAULT or ghost-trade shortfall button), item.php send pre-fill (e.g. Xanax), a property ID / market price / happiness bar, and an outreach mail queue (loss-buy-marketing to Torn compose, 10 s gap between mails).
 // @author       FFScouter / Glasnost [1844049] & Solenya [4053619]
 // @match        https://www.torn.com/profiles.php*
@@ -262,7 +262,7 @@
   const q    = new URLSearchParams(location.search);
   const path = location.pathname;
 
-  const VERSION    = '6.3';   // keep in sync with @version above
+  const VERSION    = '6.8';   // keep in sync with @version above
   const UPDATE_URL = 'https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js';   // empty = update check off
   const isPDA      = typeof window.flutter_inappwebview !== 'undefined' || /TornPDA/i.test(navigator.userAgent);
 
@@ -329,13 +329,9 @@
     b.addEventListener('click', e => { if (e.isTrusted) fn(); });
     return b;
   };
-  const handle = (text, title, css) => {
-    const s = document.createElement('span');
-    s.textContent = text;
-    s.title = title;
-    s.style.cssText = 'color:#9aa7b2;user-select:none;-webkit-user-select:none;touch-action:none;' + css;
-    return s;
-  };
+  // fixed proportions on one non-wrapping row: the label shrinks to fit instead of the button resizing
+  const flexBtn = (b, f) => { b.style.cssText += ';box-sizing:border-box;flex:' + f + ';height:40px;padding:0 8px;white-space:nowrap;overflow:hidden;min-width:0;text-align:center'; };
+  const flexRow = () => { const r = document.createElement('div'); r.style.cssText = 'display:flex;flex-wrap:nowrap;gap:8px;flex:1 1 100%;min-width:0'; return r; };
   function fit(b, max) {
     if (b._fitText === b.textContent && b._fitW === b.clientWidth) return;
     b._fitText = b.textContent;
@@ -343,6 +339,187 @@
     b.style.fontSize = size + 'px';
     while (b.clientWidth && b.scrollWidth > b.clientWidth && size > 8) b.style.fontSize = --size + 'px';
     b._fitW = b.clientWidth;
+  }
+
+  // one note at a time, pinned to the bottom (above PDA's bottom bar). ok: true green, false red, 'warn' yellow
+  function note(text, ok) {
+    const old = document.getElementById('ffq-note');
+    if (old) old.remove();
+    const n = document.createElement('div');
+    n.id = 'ffq-note';
+    n.textContent = text;
+    n.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);z-index:2147483647;border-radius:6px;padding:8px 12px;font:bold 13px Arial,sans-serif;max-width:92vw;text-align:center;border:1px solid;bottom:' + (isPDA ? '84px' : '24px') + ';' +
+      (ok === 'warn' ? 'background:#4a3a0a;color:#fde68a;border-color:#d4a017' : ok ? 'background:#14532d;color:#d1fae5;border-color:#22c55e' : 'background:#7a1a1a;color:#f8d7da;border-color:#e05555');
+    n.onclick = () => n.remove();
+    document.body.appendChild(n);
+    setTimeout(() => n.remove(), ok === 'warn' ? 10000 : 6000);
+  }
+
+  // ledger of ids already done ({id: time}), each kept for ttl ms; one per site, since Torn and ffscouter storage are apart
+  function ledger(key, ttl) {
+    let l = {};
+    try { l = JSON.parse(localStorage.getItem(key)) || {}; } catch (e) {}
+    Object.keys(l).forEach(k => { if (Date.now() - l[k] > ttl) delete l[k]; });
+    return l;
+  }
+  function remember(key, ttl, pairs) {
+    const l = ledger(key, ttl);
+    pairs.forEach(([k, t]) => { if (k && t > 0) l[k] = Math.min(t, Date.now()); });
+    try { localStorage.setItem(key, JSON.stringify(l)); } catch (e) {}
+    return l;
+  }
+  // Torn side: tell the ffscouter page that opened this queue (if it is still open) which ids are done
+  function tellPanel(field, l) {
+    const data = { [field]: Object.keys(l).map(k => [k, l[k]]) };
+    if (!data[field].length || !window.opener) return;
+    ['https://ffscouter.com', 'https://www.ffscouter.com'].forEach(o => { try { window.opener.postMessage(data, o); } catch (e) {} });
+  }
+  // ffscouter side: the done ids come back by postMessage, or on PDA (tabs cannot message each other) in the #hash
+  // of the Torn panel's "Panel ↩" link
+  function inbox(field, add) {
+    window.addEventListener('message', e => {
+      if (e.origin === 'https://www.torn.com' && e.data && Array.isArray(e.data[field])) add(e.data[field].map(r => [String(r[0]), Number(r[1])]));
+    });
+    const m = new RegExp('(?:^#|&)' + field.toLowerCase() + '=([^&]*)').exec(location.hash);
+    if (m) {
+      add(decodeURIComponent(m[1]).split(',').filter(Boolean).map(id => [id, Date.now()]));
+      history.replaceState(null, '', location.pathname + location.search);
+    }
+  }
+
+  // ffscouter: the orange "send to Torn" button (refreshed every second); extra() runs on each refresh
+  const floatBtn = (bottom, bg) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.style.cssText = 'position:fixed;right:16px;bottom:' + bottom + 'px;z-index:2147483647;background:' + bg + ';color:#fff;border:0;border-radius:6px;padding:10px 14px;font:bold 14px Arial,sans-serif;cursor:pointer';
+    document.body.appendChild(b);
+    return b;
+  };
+  function queueLauncher(usable, label, url, extra) {
+    const btn = floatBtn(16, '#ea580c');
+    const refresh = () => {
+      const n = usable().length;
+      btn.textContent   = label(n);
+      btn.disabled      = !n;
+      btn.style.opacity = n ? '1' : '0.5';
+      if (extra) extra();
+    };
+    setInterval(refresh, 1000);
+    refresh();
+    btn.addEventListener('click', () => { if (usable().length) window.open(url(), '_blank'); });
+    return refresh;
+  }
+
+  // watch Torn's own XHR / fetch replies: fn(url, request body, reply text)
+  function hookCalls(fn) {
+    const xhrOpen = XMLHttpRequest.prototype.open, xhrSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function (m, u) { this._ffUrl = String(u); return xhrOpen.apply(this, arguments); };
+    XMLHttpRequest.prototype.send = function (body) {
+      this.addEventListener('load', () => fn(this._ffUrl, body, this.responseText));
+      return xhrSend.apply(this, arguments);
+    };
+    const nativeFetch = window.fetch;
+    window.fetch = function (input, init) {
+      const url = typeof input === 'string' ? input : input && input.url, body = init && init.body;
+      return nativeFetch.apply(this, arguments).then(r => { r.clone().text().then(t => fn(url, body, t)).catch(() => {}); return r; });
+    };
+  }
+
+  // a queue panel docked inside the page like a native Torn block: grip, info line, button row, hotkey picker, ✕.
+  // The hotkey runs step(); typing in a field never triggers it (typeKeysOnly: only keys that type a character are
+  // left alone there, so an arrow key still works while Torn's To field has focus)
+  function makePanel(step, stop, typeKeysOnly) {
+    const KEY_HK = 'ffscouter_hotkey_v1';
+    const getKey = () => localStorage.getItem(KEY_HK) || 'ArrowRight';
+    let held = false, capturing = false;
+
+    const panel = document.createElement('div');
+    panel.id = 'ffq-panel';
+    panel.style.cssText = 'position:relative;box-sizing:border-box;display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:8px;width:auto;margin:8px 0;background:#1f2933;color:#e6e6e6;border:1px solid #4a4f57;border-radius:6px;padding:34px 10px 10px;font:bold 13px Arial,sans-serif';
+    const grip = document.createElement('span');
+    grip.style.cssText = 'color:#9aa7b2;user-select:none;-webkit-user-select:none;touch-action:none;position:absolute;top:4px;left:4px;cursor:pointer;font-size:16px;padding:4px 10px';
+    const info = document.createElement('span');
+    info.style.cssText = 'flex:1 1 100%;text-align:center;font-size:14px';
+    const btnRow = flexRow();
+    const keyLabel = () => { keyBtn.textContent = capturing ? 'Press a key…' : 'Key: ' + keyName(getKey()); };
+    const keyBtn = button('#374151', () => {
+      capturing = true;
+      keyLabel();
+      document.addEventListener('keydown', function pick(e) {
+        if (/^(Shift|Control|Alt|Meta)$/.test(e.key)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        document.removeEventListener('keydown', pick, true);
+        if (e.key !== 'Escape') localStorage.setItem(KEY_HK, e.code);
+        held = e.key !== 'Escape';
+        capturing = false;
+        keyLabel();
+      }, true);
+    });
+    if (isPDA) keyBtn.style.display = 'none';   // no keyboard shortcuts on PDA
+    keyBtn.title = 'Click, then press the key you want for the queue button';
+    keyLabel();
+    const stopBtn = button('#7a1a1a', () => { stop(); panel.remove(); });
+    stopBtn.textContent = '✕';
+    stopBtn.style.cssText += ';position:absolute;top:4px;right:4px;padding:3px 10px;font-size:13px';
+    grip.className = info.className = stopBtn.className = 'ffq-keep';
+    panel.append(grip, info, btnRow, keyBtn, stopBtn);
+
+    function onKey(e) {
+      if (capturing || e.code !== getKey()) return;
+      if (e.repeat || held) return;   // a held key never repeats
+      held = true;
+      const a = (e.target.ownerDocument || document).activeElement || {};
+      if (!e.isTrusted || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+      if ((!typeKeysOnly || e.key.length === 1) && (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || a.isContentEditable)) return;
+      e.preventDefault();
+      step();
+    }
+    const listen = doc => {
+      doc.addEventListener('keydown', onKey, true);
+      doc.addEventListener('keyup', e => { if (e.code === getKey()) held = false; }, true);
+    };
+    listen(document);
+    window.addEventListener('blur', () => { held = false; });
+    return { panel, grip, info, btnRow, keyBtn, listen };
+  }
+
+  // the way back to the ffscouter page: a queue tab it opened closes itself; on PDA the panel tab is reloaded with
+  // the done ids in its #hash. Adds the PDA "Panel ↩" link and returns finished(), run when the queue ends.
+  function backTools(panel, panelUrl, title, doneText) {
+    const backLink = (text, css) => {
+      const a = document.createElement('a');
+      a.textContent = text;
+      a.title = title;
+      a.style.cssText = 'color:#fff;background:#374151;border-radius:6px;text-decoration:none;font:bold 13px Arial,sans-serif;padding:4px 10px;' + css;
+      a.addEventListener('click', e => {
+        a.href = panelUrl();
+        if (window.opener && !window.opener.closed) { e.preventDefault(); closeTab(panelUrl(), () => { location.href = panelUrl(); }); }
+      });
+      a.href = panelUrl();
+      return a;
+    };
+    if (isPDA) { const pl = backLink('Panel ↩', 'position:absolute;top:4px;left:44px'); pl.className = 'ffq-keep'; panel.append(pl); }
+    return () => {
+      setTimeout(() => closeTab(panelUrl()), 1500);   // long enough to read the "finished" note
+      if (!isPDA) return;
+      const b = document.createElement('div');
+      b.style.cssText = 'margin:8px 0;padding:10px;text-align:center;background:#14532d;color:#d1fae5;border:1px solid #22c55e;border-radius:6px;font:bold 14px Arial,sans-serif';
+      b.append(doneText, backLink('Back to panel ↩', 'margin-left:8px'));
+      dockHost().prepend(b);
+    };
+  }
+
+  // a queue tab was opened by the panel's button, so it may close itself. On PDA the panel tab is first reloaded
+  // with the sent list in its #hash (PDA tabs cannot message each other). If the tab cannot close, fallback runs.
+  function closeTab(panelUrl, fallback) {
+    try {
+      if (window.opener && !window.opener.closed) {
+        if (isPDA) window.opener.location.href = panelUrl;
+        window.close();
+      }
+    } catch (e) {}
+    if (fallback) setTimeout(() => { if (!window.closed) fallback(); }, 500);
   }
 
   // queue panels sit at the top of the page like a native Torn block. The ▲ / ▼ handle minimises a panel to its
@@ -383,34 +560,13 @@
 
   // ── ffscouter.com: send pending payments to Torn as a queue ──
   function ffscouterSender() {
-    // payments the Torn queue tab reported as sent (it posts them back to this tab, which opened it); they are
-    // left out of the next queue so a job the panel has not confirmed yet is never opened or paid again
+    // payments the Torn queue tab reported as sent, keyed by the payment's code (the LP-… first word of its message,
+    // unique per job); left out of the next queue so a job the panel has not confirmed yet is never paid again
     const KEY_SENT = 'ffscouter_sent_v1', SENT_TTL = 30 * 60 * 1000;
-    const sentLedger = () => {
-      let l = {};
-      try { l = JSON.parse(localStorage.getItem(KEY_SENT)) || {}; } catch (e) {}
-      Object.keys(l).forEach(k => { if (Date.now() - l[k] > SENT_TTL) delete l[k]; });
-      return l;
-    };
-    // keyed by the payment's code (the LP-… first word of its message), which is unique per job
     const code = ref => String(ref).trim().split(/\s+/)[0];
-    const remember = pairs => {
-      const l = sentLedger();
-      pairs.forEach(([c, t]) => { if (/^[\w-]+$/.test(c) && t > 0) l[c] = Math.min(t, Date.now()); });
-      try { localStorage.setItem(KEY_SENT, JSON.stringify(l)); } catch (err) {}
-    };
-    window.addEventListener('message', e => {
-      if (e.origin !== 'https://www.torn.com' || !e.data || !Array.isArray(e.data.ffSent)) return;
-      remember(e.data.ffSent.filter(r => typeof r[0] === 'string').map(r => [code(r[0]), Number(r[1])]));
-    });
-    // PDA: tabs cannot message each other, so the Torn panel's "Panel ↩" link carries the sent codes in the #hash
-    const hm = /(?:^#|&)ffsent=([^&]*)/.exec(location.hash);
-    if (hm) {
-      remember(decodeURIComponent(hm[1]).split(',').filter(Boolean).map(c => [c, Date.now()]));
-      history.replaceState(null, '', location.pathname + location.search);
-    }
+    inbox('ffSent', p => remember(KEY_SENT, SENT_TTL, p.map(([c, t]) => [code(c), t]).filter(([c]) => /^[\w-]+$/.test(c))));
 
-    const usable = () => { const l = sentLedger(); return [...document.querySelectorAll('#claimed-jobs .job-card[data-job-status="pending"] a[data-receiver-link]')]
+    const usable = () => { const l = ledger(KEY_SENT, SENT_TTL); return [...document.querySelectorAll('#claimed-jobs .job-card[data-job-status="pending"] a[data-receiver-link]')]
       .filter(a => { const u = new URL(a.href), p = u.searchParams; return u.pathname === '/profiles.php' && p.get('XID') && p.get('paymentamount') && p.get('paymentref') && !l[code(p.get('paymentref'))]; }); };   // profile pay links only, never a mail Compose link
 
     const jobId = a => {
@@ -442,16 +598,24 @@
         .catch(() => say('Release failed - release it from this page by hand'));
     }
 
+    // where the Torn queue takes you when cash runs short: the vault or your ghost trade. Saved here and sent with
+    // every queue, so it is the default until it is clicked again
+    const KEY_SRC = 'ffscouter_cashsrc_v1';
+    const cashSrc = () => localStorage.getItem(KEY_SRC) === 'trade' ? 'trade' : 'vault';
+    const srcBtn = floatBtn(62, '#374151');
+    srcBtn.title = 'Where the Torn queue gets cash when you run short. Click to switch.';
+    srcBtn.addEventListener('click', () => { localStorage.setItem(KEY_SRC, cashSrc() === 'trade' ? 'vault' : 'trade'); refresh(); });
+
     function queueUrl() {
       const links = usable();
       const rows  = links.map(a => new URL(a.href).searchParams);
       const ref0  = rows[0].get('paymentref');
       const sfx   = ref0.indexOf(' ') < 0 ? '' : ref0.slice(ref0.indexOf(' '));
-      const queue = rows.map(p => {
+      const queue = rows.map((p, i) => {
         const ref = p.get('paymentref');
         return [p.get('XID'), p.get('paymentamount'),
                 sfx && ref.endsWith(sfx) ? ref.slice(0, -sfx.length) + '§' : ref,   // § = shared ending, kept once
-                p.get('anonymous') === '1' ? 1 : 0, jobId(links[rows.indexOf(p)])];
+                p.get('anonymous') === '1' ? 1 : 0, jobId(links[i])];
       });
       const b64 = btoa(unescape(encodeURIComponent(JSON.stringify({ s: sfx, q: queue, c: cashSrc() }))));
       // first player's profile without the pay pre-fill: if Torn knows that job is already paid, it moves on to the
@@ -459,60 +623,17 @@
       return 'https://www.torn.com/profiles.php?XID=' + rows[0].get('XID') + '&ffq=' + encodeURIComponent(b64);
     }
 
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;background:#ea580c;color:#fff;border:0;border-radius:6px;padding:10px 14px;font:bold 14px Arial,sans-serif;cursor:pointer';
-    document.body.appendChild(btn);
-
-    // where the Torn queue takes you when cash runs short: the vault or your ghost trade. Saved here and sent with
-    // every queue, so it is the default until it is clicked again
-    const KEY_SRC = 'ffscouter_cashsrc_v1';
-    const cashSrc = () => localStorage.getItem(KEY_SRC) === 'trade' ? 'trade' : 'vault';
-    const srcBtn = document.createElement('button');
-    srcBtn.type = 'button';
-    srcBtn.title = 'Where the Torn queue gets cash when you run short. Click to switch.';
-    srcBtn.style.cssText = btn.style.cssText + ';bottom:62px;background:#374151';
-    srcBtn.addEventListener('click', () => { localStorage.setItem(KEY_SRC, cashSrc() === 'trade' ? 'vault' : 'trade'); refresh(); });
-    document.body.appendChild(srcBtn);
-
-    const refresh = () => {
-      const n = usable().length;
-      srcBtn.textContent = 'Cash from: ' + (cashSrc() === 'trade' ? 'Ghost trade' : 'Vault') + ' ⇄';
-      btn.textContent   = n ? 'Send ' + n + ' to Torn queue' : 'No pending payments';
-      btn.disabled      = !n;
-      btn.style.opacity = n ? '1' : '0.5';
-    };
-    setInterval(refresh, 1000);
-    refresh();
-
-    btn.addEventListener('click', () => { if (usable().length) window.open(queueUrl(), '_blank'); });
+    const refresh = queueLauncher(usable, n => n ? 'Send ' + n + ' to Torn queue' : 'No pending payments', queueUrl,
+      () => { srcBtn.textContent = 'Cash from: ' + (cashSrc() === 'trade' ? 'Ghost trade' : 'Vault') + ' ⇄'; });
   }
 
   // ── ffscouter.com loss-buy-marketing: send the claimed outreach mails to Torn as a queue ──
   function outreachSender() {
-    // mails the Torn queue tab reported as sent (by the row's data-compose-assign id); left out of the next queue
+    // mails the Torn queue tab reported as done (sent, failed or skipped), by the row's data-compose-assign id;
+    // left out of the next queue
     const KEY_MAILED = 'ffscouter_mailed_v1', MAILED_TTL = 7 * 24 * 3600 * 1000;
-    const mailedLedger = () => {
-      let l = {};
-      try { l = JSON.parse(localStorage.getItem(KEY_MAILED)) || {}; } catch (e) {}
-      Object.keys(l).forEach(k => { if (Date.now() - l[k] > MAILED_TTL) delete l[k]; });
-      return l;
-    };
-    const remember = pairs => {
-      const l = mailedLedger();
-      pairs.forEach(([id, t]) => { if (/^\d+$/.test(id) && t > 0) l[id] = Math.min(t, Date.now()); });
-      try { localStorage.setItem(KEY_MAILED, JSON.stringify(l)); } catch (err) {}
-    };
-    window.addEventListener('message', e => {
-      if (e.origin !== 'https://www.torn.com' || !e.data || !Array.isArray(e.data.ffMailed)) return;
-      remember(e.data.ffMailed.map(r => [String(r[0]), Number(r[1])]));
-    });
-    // PDA: the Torn panel's "Panel ↩" link carries the sent ids in the #hash
-    const hm = /(?:^#|&)ffmailed=([^&]*)/.exec(location.hash);
-    if (hm) {
-      remember(decodeURIComponent(hm[1]).split(',').filter(Boolean).map(id => [id, Date.now()]));
-      history.replaceState(null, '', location.pathname + location.search);
-    }
+    const mailed = () => ledger(KEY_MAILED, MAILED_TTL);
+    inbox('ffMailed', p => remember(KEY_MAILED, MAILED_TTL, p.filter(([id]) => /^\d+$/.test(id))));
 
     // [XID, name, subject, html body, assign id] from a row's pre-filled Torn compose link
     const row = a => {
@@ -527,7 +648,11 @@
     // claimed rows only: the "Clicked" list below has no data-compose-assign and is never queued
     const links  = () => [...document.querySelectorAll('#outreach-rows a[data-compose-assign]')]
       .filter(a => !a.closest('#outreach-clicked-wrap') && /^\d+$/.test(a.dataset.composeAssign));
-    const usable = () => { const l = mailedLedger(); return links().filter(a => !l[a.dataset.composeAssign]).map(row).filter(Boolean); };
+    // only the newest batch is queued (the page keeps older batches listed after "Request more")
+    const boxOf   = a => a.closest('.border') || a.parentElement;
+    const batchOf = a => { const m = /Batch #(\d+)/.exec(boxOf(a).textContent); return m ? Number(m[1]) : 0; };
+    const latest  = () => Math.max(0, ...links().map(batchOf));
+    const usable  = () => { const l = mailed(), b = latest(); return links().filter(a => batchOf(a) === b && !l[a.dataset.composeAssign]).map(row).filter(Boolean); };
 
     function queueUrl() {
       const queue = usable();
@@ -536,38 +661,26 @@
       return 'https://www.torn.com/messages.php?ffmail=0#/p=compose&XID=' + queue[0][0] + '&ffm=' + encodeURIComponent(b64);
     }
 
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;background:#ea580c;color:#fff;border:0;border-radius:6px;padding:10px 14px;font:bold 14px Arial,sans-serif;cursor:pointer';
-    document.body.appendChild(btn);
-
-    const refresh = () => {
-      const l = mailedLedger();
-      // dim the rows already mailed from this browser (the panel counts them once Torn's logs confirm)
+    queueLauncher(usable, n => n ? 'Send ' + n + ' mail' + (n > 1 ? 's' : '') + (latest() ? ' (Batch #' + latest() + ')' : '') + ' to Torn queue' : 'No mails to send', queueUrl, () => {
+      // dim the rows already done from this browser (the panel counts them once Torn's logs confirm)
+      const l = mailed();
       links().forEach(a => {
-        const box = a.closest('.border') || a.parentElement;
+        const box = boxOf(a);
         if (!l[a.dataset.composeAssign] || box.dataset.ffMailed) return;
         box.dataset.ffMailed = '1';
         box.style.opacity = '0.45';
         const tag = document.createElement('span');
-        tag.textContent = 'Mailed ✓';
+        tag.textContent = 'Done ✓ (mailed or skipped)';
         tag.style.cssText = 'margin-left:8px;color:#22c55e;font-size:12px';
         a.after(tag);
       });
-      const n = usable().length;
-      btn.textContent   = n ? 'Send ' + n + ' mail' + (n > 1 ? 's' : '') + ' to Torn queue' : 'No mails to send';
-      btn.disabled      = !n;
-      btn.style.opacity = n ? '1' : '0.5';
-    };
-    setInterval(refresh, 1000);
-    refresh();
-
-    btn.addEventListener('click', () => { if (usable().length) window.open(queueUrl(), '_blank'); });
+    });
   }
 
   // ── profiles.php: queue panel (hit 1 arm, hit 2 send, hit 3 next) ──
   function queuePanel() {
-    const KEY = 'ffscouter_queue_v2', KEY_HK = 'ffscouter_hotkey_v1', KEY_LAST = 'ffscouter_lastsend_v1';
+    const KEY = 'ffscouter_queue_v2', KEY_LAST = 'ffscouter_lastsend_v1';
+    const KEY_SRC = 'ffscouter_cashsrc_v1', KEY_GHOST = 'ffscouter_ghosttrade_v1';
     const SEND_GAP = 2000;
     const ARM_MS   = 30000;
 
@@ -582,61 +695,30 @@
     // ledger of payments already sent (by their unique payment reference), so a job the panel still shows
     // as pending is not paid twice when it comes back in a later queue
     const KEY_SENT = 'ffscouter_sent_v1', SENT_TTL = 30 * 60 * 1000;
-    const sentLedger = () => {
-      let l = {};
-      try { l = JSON.parse(localStorage.getItem(KEY_SENT)) || {}; } catch (e) {}
-      Object.keys(l).forEach(k => { if (Date.now() - l[k] > SENT_TTL) delete l[k]; });
-      return l;
-    };
-    // tell the support panel tab that opened this queue (if it is still open) which payments are sent
-    const tellPanel = l => {
-      const data = { ffSent: Object.keys(l).map(k => [k, l[k]]) };
-      if (!data.ffSent.length || !window.opener) return;
-      ['https://ffscouter.com', 'https://www.ffscouter.com'].forEach(o => { try { window.opener.postMessage(data, o); } catch (e) {} });
-    };
-    const markSent = ref => { const l = sentLedger(); l[String(ref).trim()] = Date.now(); localStorage.setItem(KEY_SENT, JSON.stringify(l)); tellPanel(l); };
-    tellPanel(sentLedger());
+    const markSent = ref => tellPanel('ffSent', remember(KEY_SENT, SENT_TTL, [[String(ref).trim(), Date.now()]]));
+    tellPanel('ffSent', ledger(KEY_SENT, SENT_TTL));
 
     // also remember payments sent with Torn's own SEND button (the pre-filled form), not just the queue's:
     // watch Torn's sendcash.php calls and record the message of every one Torn confirms
-    const sentCall = (url, body, text) => {
+    hookCalls((url, body, text) => {
       if (!/sendcash\.php/.test(url || '')) return;
       try {
         const p = body instanceof FormData ? body : new URLSearchParams(typeof body === 'string' ? body : '');
         if (/cash1/.test(p.get('step') || '') && p.get('tag') && JSON.parse(text).success === true) markSent(p.get('tag'));
       } catch (e) {}
-    };
-    const xhrOpen = XMLHttpRequest.prototype.open, xhrSend = XMLHttpRequest.prototype.send;
-    XMLHttpRequest.prototype.open = function (m, u) { this._ffUrl = String(u); return xhrOpen.apply(this, arguments); };
-    XMLHttpRequest.prototype.send = function (body) {
-      this.addEventListener('load', () => sentCall(this._ffUrl, body, this.responseText));
-      return xhrSend.apply(this, arguments);
-    };
-    const nativeFetch = window.fetch;
-    window.fetch = function (input, init) {
-      const url = typeof input === 'string' ? input : input && input.url, body = init && init.body;
-      return nativeFetch.apply(this, arguments).then(r => { r.clone().text().then(t => sentCall(url, body, t)).catch(() => {}); return r; });
-    };
-    function skipNote(text) {
-      const n = document.createElement('div');
-      n.textContent = text;
-      n.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);z-index:2147483647;border-radius:6px;padding:8px 12px;font:bold 13px Arial,sans-serif;max-width:92vw;text-align:center;border:1px solid #d4a017;background:#4a3a0a;color:#fde68a;bottom:' + (isPDA ? '84px' : '24px');
-      n.onclick = () => n.remove();
-      document.body.appendChild(n);
-      setTimeout(() => n.remove(), 10000);
-    }
+    });
 
-    let skipped = 0;
     if (q.get('ffq')) {
       try {
         const p = JSON.parse(decodeURIComponent(escape(atob(q.get('ffq')))));
-        const ledger = sentLedger();
+        const l = ledger(KEY_SENT, SENT_TTL);
         const rows = p.q.filter(r => /^\d+$/.test(r[0]) && /^\d+$/.test(r[1]));
-        const fresh = rows.filter(r => !ledger[String(r[2]).replace('§', () => p.s || '').trim()]);
-        skipped = rows.length - fresh.length;
+        const fresh = rows.filter(r => !l[String(r[2]).replace('§', () => p.s || '').trim()]);
         if (fresh.length) save({ q: fresh, s: p.s || '', i: 0, d: [] });
-        if (p.c === 'trade' || p.c === 'vault') localStorage.setItem('ffscouter_cashsrc_v1', p.c);   // the support panel's choice
         else localStorage.removeItem(KEY);
+        if (p.c === 'trade' || p.c === 'vault') localStorage.setItem(KEY_SRC, p.c);   // the support panel's choice
+        const skipped = rows.length - fresh.length;
+        if (skipped) note(skipped + ' payment' + (skipped > 1 ? 's' : '') + ' already sent from this browser - left out of the queue. Wait for the panel to confirm them.', 'warn');
         // the queue link lands on the panel's first job with no pre-fill. If Torn knows that one is already paid,
         // the panel shows "not on this player" and its Open button takes you to the first unpaid player: one click,
         // one page load - nothing is loaded on Torn without your input
@@ -645,14 +727,7 @@
         history.replaceState(null, '', u);
       } catch (e) { console.warn('[FFScouter] Could not read queue from URL', e); }
     }
-    if (!skipped && /^\d+$/.test(q.get('ffskip') || '')) {
-      skipped = Number(q.get('ffskip'));
-      const u = new URL(location.href);
-      u.searchParams.delete('ffskip');
-      history.replaceState(null, '', u);
-    }
 
-    if (skipped) skipNote(skipped + ' payment' + (skipped > 1 ? 's' : '') + ' already sent from this browser - left out of the queue. Wait for the panel to confirm them.');
     let S = load();
     if (!S) return;
 
@@ -671,21 +746,6 @@
       return Math.max(0, sum - cash()) || 0;
     }
 
-    function note(text, ok) {
-      const old = document.getElementById('ffq-note');
-      if (old) old.remove();
-      const n = document.createElement('div');
-      n.id = 'ffq-note';
-      n.textContent = text;
-      n.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);z-index:2147483647;border-radius:6px;padding:8px 12px;font:bold 13px Arial,sans-serif;max-width:92vw;text-align:center;border:1px solid;' +
-        (ok ? 'background:#14532d;color:#d1fae5;border-color:#22c55e' : 'background:#7a1a1a;color:#f8d7da;border-color:#e05555');
-      n.onclick = () => n.remove();
-      document.body.appendChild(n);
-      // the docked panel scrolls with the page, so pin the note to the bottom (above PDA's bottom bar)
-      n.style.bottom = isPDA ? '84px' : '24px';
-      setTimeout(() => n.remove(), 6000);
-    }
-
     let armed = -1, armedAt = 0, sending = false;
 
     // vault page: hit 1 withdraw, hit 2 back to the queue
@@ -698,7 +758,6 @@
 
     // where short cash comes from: the vault (amount pre-filled) or a ghost trade (take the money out by hand).
     // The choice is remembered for every queue until it is flipped again.
-    const KEY_SRC = 'ffscouter_cashsrc_v1', KEY_GHOST = 'ffscouter_ghosttrade_v1';
     const src = () => localStorage.getItem(KEY_SRC) === 'trade' ? 'trade' : 'vault';
     const atTrade = path === '/trade.php';
     // the last trade opened from the queue is taken to be the ghost trade, so the next trip goes straight to it
@@ -721,7 +780,7 @@
     }
 
     function next() {
-      if (S.i >= S.q.length - 1) { localStorage.removeItem(KEY); S = null; panel.remove(); finished(); return; }
+      if (S.i >= S.q.length - 1) { localStorage.removeItem(KEY); S = null; P.panel.remove(); finished(); return; }
       S.i++; save(S);
       location.href = urlFor(S, S.i);
     }
@@ -760,53 +819,11 @@
         .then(() => { localStorage.setItem(KEY_LAST, Date.now()); sending = false; show(); });
     }
 
-    const getKey  = () => localStorage.getItem(KEY_HK) || 'ArrowRight';
-    let held = false, capturing = false;
-
-    document.addEventListener('keydown', e => {
-      if (capturing || e.code !== getKey()) return;
-      if (e.repeat || held) return;   // a held key never repeats
-      held = true;
-      const a = document.activeElement || {};
-      if (!e.isTrusted || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
-      if (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || a.isContentEditable) return;
-      e.preventDefault();
-      step();
-    }, true);
-    document.addEventListener('keyup', e => { if (e.code === getKey()) held = false; }, true);
-    window.addEventListener('blur', () => { held = false; });
-
-    function chooseKey() {
-      capturing = true;
-      show();
-      document.addEventListener('keydown', function pick(e) {
-        if (/^(Shift|Control|Alt|Meta)$/.test(e.key)) return;
-        e.preventDefault();
-        e.stopPropagation();
-        document.removeEventListener('keydown', pick, true);
-        if (e.key !== 'Escape') localStorage.setItem(KEY_HK, e.code);
-        held = e.key !== 'Escape';
-        capturing = false;
-        show();
-      }, true);
-    }
-
-    const panel = document.createElement('div');
-    panel.id = 'ffq-panel';
-    // docked inside the page like a native Torn block (full width, scrolls with the page)
-    panel.style.cssText = 'position:relative;box-sizing:border-box;display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:8px;width:auto;margin:8px 0;background:#1f2933;color:#e6e6e6;border:1px solid #4a4f57;border-radius:6px;padding:34px 10px 10px;font:bold 13px Arial,sans-serif';
-
-    const grip     = handle('▼', '', 'position:absolute;top:4px;left:4px;cursor:pointer;font-size:16px;padding:4px 10px');
-    const info     = document.createElement('span');
-    info.style.cssText = 'flex:1 1 100%;text-align:center;font-size:14px';
-    grip.className = info.className = 'ffq-keep';
-    const btnRow   = document.createElement('div');
-    btnRow.style.cssText = 'display:flex;flex-wrap:nowrap;gap:8px;flex:1 1 100%;min-width:0';
+    const P = makePanel(step, () => { localStorage.removeItem(KEY); S = null; }, false);
+    P.keyBtn.title = 'Click, then press the key you want for SEND / CONFIRM / NEXT';
     const sendBtn  = button('#15803d', step);
     const vaultBtn = button('#ea580c', toCash);
     const srcBtn   = button('#374151', () => { localStorage.setItem(KEY_SRC, src() === 'trade' ? 'vault' : 'trade'); show(); });
-    const cashRow  = document.createElement('div');
-    cashRow.style.cssText = 'display:flex;flex-wrap:nowrap;gap:8px;flex:1 1 100%;min-width:0';
     const releaseBtn = button('#92400e', () => {
       const it = S.q[S.i];
       if (!it[4] || paid(S) || !confirm('Release [' + it[0] + '] from the support panel queue? This skips them without paying.')) return;
@@ -820,49 +837,22 @@
     releaseBtn.textContent = 'Release';
     releaseBtn.title = 'Releases this job on the FFScouter support panel and skips it';
     const nextBtn  = button('#00ADB5', () => onPage(S) ? next() : (location.href = urlFor(S, S.i)));
-    const keyBtn   = button('#374151', chooseKey);
-    if (isPDA) keyBtn.style.display = 'none';   // no keyboard shortcuts on PDA
-    keyBtn.title   = 'Click, then press the key you want for SEND / CONFIRM / NEXT';
-    const stopBtn  = button('#7a1a1a', () => { localStorage.removeItem(KEY); S = null; panel.remove(); });
-    stopBtn.textContent = '✕';
-    stopBtn.className = 'ffq-keep';
-    stopBtn.style.cssText += ';position:absolute;top:4px;right:4px;padding:3px 10px;font-size:13px';
-    // fixed proportions on one non-wrapping row: the label shrinks to fit instead of the button resizing
-    [[sendBtn, '3 1 0'], [nextBtn, '1.3 1 0'], [releaseBtn, '1 1 0'], [vaultBtn, '3 1 0'], [srcBtn, '1.3 1 0']].forEach(([b, f]) => {
-      b.style.cssText += ';box-sizing:border-box;flex:' + f + ';height:40px;padding:0 8px;white-space:nowrap;overflow:hidden;min-width:0;text-align:center';
-    });
-    btnRow.append(sendBtn, releaseBtn, nextBtn);
+    [[sendBtn, '3 1 0'], [nextBtn, '1.3 1 0'], [releaseBtn, '1 1 0'], [vaultBtn, '3 1 0'], [srcBtn, '1.3 1 0']].forEach(([b, f]) => flexBtn(b, f));
+    const cashRow  = flexRow();
+    P.btnRow.append(sendBtn, releaseBtn, nextBtn);
     cashRow.append(vaultBtn, srcBtn);
-    panel.append(grip, info, btnRow, cashRow, keyBtn, stopBtn);
+    P.btnRow.after(cashRow);
 
-    // PDA: tabs cannot message each other, so going back to the support panel through this link hands it the codes
-    // of the payments already sent (in the #hash, never sent to a server); the next queue then leaves them out
+    // payments sent here go back to the support panel, which leaves them out of the next queue
     const panelUrl = () => 'https://ffscouter.com/supportpanel/payment-provider#ffsent=' +
-      encodeURIComponent(Object.keys(sentLedger()).map(k => k.split(/\s+/)[0]).join(','));
-    const backLink = (text, css) => {
-      const a = document.createElement('a');
-      a.textContent = text;
-      a.title = 'Back to the support panel; payments sent here are left out of the next queue';
-      a.style.cssText = 'color:#fff;background:#374151;border-radius:6px;text-decoration:none;font:bold 13px Arial,sans-serif;padding:4px 10px;' + css;
-      a.addEventListener('click', () => { a.href = panelUrl(); });
-      a.href = panelUrl();
-      return a;
-    };
-    if (isPDA) { const pl = backLink('Panel ↩', 'position:absolute;top:4px;left:44px'); pl.className = 'ffq-keep'; panel.append(pl); }
-    function finished() {
-      if (!isPDA) return;
-      const b = document.createElement('div');
-      b.style.cssText = 'margin:8px 0;padding:10px;text-align:center;background:#14532d;color:#d1fae5;border:1px solid #22c55e;border-radius:6px;font:bold 14px Arial,sans-serif';
-      b.append('Queue finished ✓ ', backLink('Back to panel ↩', 'margin-left:8px'));
-      dockHost().prepend(b);
-    }
-
-    dockPanel(panel, grip, () => S);
+      encodeURIComponent(Object.keys(ledger(KEY_SENT, SENT_TTL)).map(k => k.split(/\s+/)[0]).join(','));
+    const finished = backTools(P.panel, panelUrl, 'Back to the support panel; payments sent here are left out of the next queue', 'Queue finished ✓ ');
+    dockPanel(P.panel, P.grip, () => S);
 
     function show() {
       if (!S) return;
       const it = S.q[S.i], here = onPage(S), n = need(S), amt = '$' + Number(it[1]).toLocaleString('en-US');
-      info.textContent = '#' + (S.i + 1) + '/' + S.q.length + ' · [' + it[0] + '] · ' + amt +
+      P.info.textContent = '#' + (S.i + 1) + '/' + S.q.length + ' · [' + it[0] + '] · ' + amt +
         (atVault ? ' · VAULT' : atTrade ? ' · TRADE' + (n ? ' · take out $' + n.toLocaleString('en-US') : '') : here ? '' : ' · ⚠ not on this player');
 
       let text, bg;
@@ -890,7 +880,6 @@
       srcBtn.title = 'Click to take short cash from your ' + (viaTrade ? 'vault' : 'ghost trade') + ' instead. Remembered for every queue.';
 
       nextBtn.textContent = !here ? 'Open ▶' : (S.i === S.q.length - 1 ? 'Finish' : 'Next ▶');
-      keyBtn.textContent  = capturing ? 'Press a key…' : 'Key: ' + keyName(getKey());
       fit(sendBtn, 14); fit(nextBtn, 14); fit(vaultBtn, 14); fit(srcBtn, 14);
     }
 
@@ -900,70 +889,41 @@
 
   // ── messages.php: outreach mail queue (hit 1 send, hit 2 next mail). Torn allows one mail every 10 s ──
   function mailPanel() {
-    const KEY = 'ffscouter_mailq_v1', KEY_HK = 'ffscouter_hotkey_v1',
-          KEY_LAST = 'ffscouter_maillast_v1', KEY_MAILED = 'ffscouter_mailed_v1';
-    const MAIL_GAP   = 12000;   // Torn's 10 s between mails, plus 2 s spare
-    const SETTLE_MS  = 1500;    // a mail is on screen this long before it can be sent, so a double press never sends it unseen
+    const KEY = 'ffscouter_mailq_v1', KEY_LAST = 'ffscouter_maillast_v1', KEY_MAILED = 'ffscouter_mailed_v1';
+    const MAIL_GAP   = 10000;   // Torn's 10 s between mails: the only thing that holds SEND back
     const CONFIRM_MS = 8000;    // no answer from Torn by then: counted as sent (unconfirmed), never sent twice
     const MAILED_TTL = 7 * 24 * 3600 * 1000;
 
+    // the queue lives in this tab only: closing the tab drops it, and a tab opened by hand shows no panel
+    localStorage.removeItem(KEY);   // queues saved by 6.5 and older
     const load = () => {
       try {
-        const s = JSON.parse(localStorage.getItem(KEY));
+        const s = JSON.parse(sessionStorage.getItem(KEY));
         return s && s.i < s.q.length && Date.now() - s.t < 12 * 3600 * 1000 ? s : null;
       } catch (e) { return null; }
     };
-    const save = s => { s.t = Date.now(); try { localStorage.setItem(KEY, JSON.stringify(s)); } catch (e) {} };
+    const save = s => { s.t = Date.now(); try { sessionStorage.setItem(KEY, JSON.stringify(s)); } catch (e) {} };
 
-    const mailedLedger = () => {
-      let l = {};
-      try { l = JSON.parse(localStorage.getItem(KEY_MAILED)) || {}; } catch (e) {}
-      Object.keys(l).forEach(k => { if (Date.now() - l[k] > MAILED_TTL) delete l[k]; });
-      return l;
-    };
-    // tell the marketing page that opened this queue (if it is still open) which mails are sent
-    const tellPanel = l => {
-      const data = { ffMailed: Object.keys(l).map(k => [k, l[k]]) };
-      if (!data.ffMailed.length || !window.opener) return;
-      ['https://ffscouter.com', 'https://www.ffscouter.com'].forEach(o => { try { window.opener.postMessage(data, o); } catch (e) {} });
-    };
-    const markMailed = id => {
-      if (!/^\d+$/.test(id || '')) return;
-      const l = mailedLedger(); l[id] = Date.now();
-      try { localStorage.setItem(KEY_MAILED, JSON.stringify(l)); } catch (e) {}
-      tellPanel(l);
-    };
-    tellPanel(mailedLedger());
+    // sent, failed and skipped mails all go in the ledger, so no later queue picks them up
+    const mailed = () => ledger(KEY_MAILED, MAILED_TTL);
+    const markMailed = id => { if (/^\d+$/.test(id || '')) tellPanel('ffMailed', remember(KEY_MAILED, MAILED_TTL, [[id, Date.now()]])); };
+    tellPanel('ffMailed', mailed());
 
     const hp = new URLSearchParams(location.hash.indexOf('&') < 0 ? '' : location.hash.slice(location.hash.indexOf('&') + 1));
     const pageXID = hp.get('XID');
-    let skipped = 0;
     if (hp.get('ffm')) {
       try {
         const p = JSON.parse(decodeURIComponent(escape(atob(hp.get('ffm')))));
-        const l = mailedLedger();
+        const l = mailed();
         const rows = p.q.filter(r => /^\d+$/.test(r[0]) && r[2] && r[3]);
         const fresh = rows.filter(r => !l[r[4]]);
-        skipped = rows.length - fresh.length;
-        if (fresh.length) save({ q: fresh, i: 0, d: [], u: [] });
-        else localStorage.removeItem(KEY);
+        if (fresh.length) save({ q: fresh, i: 0, d: [] });
+        else sessionStorage.removeItem(KEY);
         history.replaceState(null, '', location.pathname + location.search + '#/p=compose&XID=' + pageXID);
+        const skipped = rows.length - fresh.length;
+        if (skipped) note(skipped + ' mail' + (skipped > 1 ? 's' : '') + ' already sent or skipped from this browser - left out of the queue.', true);
       } catch (e) { console.warn('[FFScouter] Could not read mail queue from URL', e); }
     }
-
-    function note(text, ok) {
-      const old = document.getElementById('ffq-note');
-      if (old) old.remove();
-      const n = document.createElement('div');
-      n.id = 'ffq-note';
-      n.textContent = text;
-      n.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);z-index:2147483647;border-radius:6px;padding:8px 12px;font:bold 13px Arial,sans-serif;max-width:92vw;text-align:center;border:1px solid;bottom:' + (isPDA ? '84px' : '24px') + ';' +
-        (ok ? 'background:#14532d;color:#d1fae5;border-color:#22c55e' : 'background:#7a1a1a;color:#f8d7da;border-color:#e05555');
-      n.onclick = () => n.remove();
-      document.body.appendChild(n);
-      setTimeout(() => n.remove(), 6000);
-    }
-    if (skipped) note(skipped + ' mail' + (skipped > 1 ? 's' : '') + ' already sent from this browser - left out of the queue.', true);
 
     let S = load();
     if (!S) return;
@@ -979,17 +939,17 @@
     function sendButton() {
       for (let r = subj(), k = 0; r && k < 10; r = r.parentElement, k++) {
         const b = [...r.querySelectorAll('button, input[type="submit"], input[type="button"]')]
-          .find(x => !panel.contains(x) && /^\s*send\b/i.test(x.value || x.textContent) && x.offsetParent !== null);
+          .find(x => !P.panel.contains(x) && /^\s*send\b/i.test(x.value || x.textContent) && x.offsetParent !== null);
         if (b) return b;
       }
       return null;
     }
 
-    let filledAt = 0, sending = false, sendAt = 0, verdict = null;
+    let filledAt = 0, filling = false, sending = false, sendAt = 0, verdict = null;
 
     // a send is clicked and the page reloaded before its answer came back (Torn posted the form): count it, never resend
     if (S.p && S.p.i === S.i && Date.now() - S.p.t < 60000 && !sent()) {
-      S.d.push(S.i); S.u.push(S.i); markMailed(S.q[S.i][4]);
+      S.d.push(S.i); markMailed(S.q[S.i][4]);
       note('Mail to ' + S.q[S.i][1] + ' counted as sent - check your Sent mail if unsure.', true);
     }
     delete S.p; save(S);
@@ -997,46 +957,37 @@
     function fill() {
       const it = S.q[S.i];
       let tries = 0;
+      filling = true;
       const t = setInterval(() => {
-        if (!S || ++tries > 150) { clearInterval(t); if (S && !filledAt) note('Compose form not found - press Open to reload this mail.'); return; }
+        if (!S || ++tries > 150) { clearInterval(t); filling = false; if (S && !filled()) note('Compose form not found - press again to retry.'); return; }
         if (!location.hash.includes('p=compose')) { const tab = document.querySelector('a[href="#/p=compose"]'); if (tab) tab.click(); return; }
         const ed = typeof tinymce !== 'undefined' ? tinymce.activeEditor : null;
         if (!subj() || !ed || !ed.getBody || !ed.getBody()) return;   // compose form / editor not ready yet
         clearInterval(t);
+        filling = false;
         setValue(subj(), it[2]);
         ed.setContent(it[3]);
-        // focus in the editor or a field would swallow the hotkey
-        const a = document.activeElement;
-        if (a && a !== document.body && a.blur) a.blur();
+        // keys pressed inside the editor stay in its iframe, so the hotkey listens there too
+        const doc = ed.getDoc && ed.getDoc();
+        if (doc && !doc._ffKey) { doc._ffKey = true; P.listen(doc); }
         filledAt = Date.now();
         show();
       }, 150);
     }
 
     // Torn's answer to the send: its JSON reply, a message that appears on the page, or the form clearing
-    const callSeen = (url, text) => {
+    hookCalls((url, body, text) => {
       if (!sending || verdict || !/messages\.php/.test(url || '')) return;
       let j;
       try { j = JSON.parse(text); } catch (e) { return; }
       if (j && (j.success === false || j.error)) verdict = { ok: false, text: strip(j.text || j.msg || j.error) };
       else if (j && j.success === true) verdict = { ok: true, text: strip(j.text || j.msg) };
-    };
-    const xhrOpen = XMLHttpRequest.prototype.open, xhrSend = XMLHttpRequest.prototype.send;
-    XMLHttpRequest.prototype.open = function (m, u) { this._ffUrl = String(u); return xhrOpen.apply(this, arguments); };
-    XMLHttpRequest.prototype.send = function () {
-      this.addEventListener('load', () => callSeen(this._ffUrl, this.responseText));
-      return xhrSend.apply(this, arguments);
-    };
-    const nativeFetch = window.fetch;
-    window.fetch = function (input) {
-      const url = typeof input === 'string' ? input : input && input.url;
-      return nativeFetch.apply(this, arguments).then(r => { r.clone().text().then(t => callSeen(url, t)).catch(() => {}); return r; });
-    };
+    });
     new MutationObserver(ms => {
       if (!sending || verdict) return;
       for (const m of ms) for (const n of m.addedNodes) {
         const el = n.nodeType === 1 ? n : n.parentNode;
-        if (!el || panel.contains(el) || (el.closest && el.closest('#ffq-note'))) continue;
+        if (!el || P.panel.contains(el) || (el.closest && el.closest('#ffq-note'))) continue;
         const t = strip(n.nodeType === 1 ? n.innerText || n.textContent : n.textContent);
         if (!t || t.length > 300) continue;
         if (/\b(not|n't)( been)? sent\b/i.test(t) || (!/\bsent\b/i.test(t) && /\b(wait|too (fast|quickly)|error|cannot|can't|unable|not allowed|failed|invalid)\b/i.test(t))) { verdict = { ok: false, text: t }; return; }
@@ -1051,29 +1002,35 @@
       if (!verdict) return;
       const v = verdict, it = S.q[S.i], last = S.i === S.q.length - 1;
       verdict = null; sending = false; delete S.p;
-      if (v.ok) {
-        S.d.push(S.i); if (v.unsure) S.u.push(S.i);
-        markMailed(it[4]); save(S);
-        note((v.unsure ? 'Torn did not confirm the mail to ' + it[1] + ' - check your Sent mail before mailing them again.' : (v.text || 'Mail sent ✓')) +
-             (last ? ' · Queue finished ✓' : ''), !v.unsure);
-        if (last) finish();
-      } else { save(S); note(v.text || 'Torn did not send the mail.'); }
+      // a clicked mail is done either way, so the button moves on and a mail is never sent twice
+      S.d.push(S.i);
+      markMailed(it[4]);   // failed ones too: never queued again
+      save(S);
+      note((!v.ok ? (v.text || 'Torn did not send the mail') + ' - skipped.' : v.unsure ? 'Torn did not confirm the mail to ' + it[1] + ' - check your Sent mail before mailing them again.' : (v.text || 'Mail sent ✓')) +
+           (last ? ' · Queue finished ✓' : ''), v.ok && !v.unsure);
+      if (last) finish();
     }
 
     function open() { if (!sending) location.href = urlFor(S.i); }
-    function finish() { localStorage.removeItem(KEY); S = null; panel.remove(); finished(); }
+    function finish() { sessionStorage.removeItem(KEY); S = null; P.panel.remove(); finished(); }
     function next() {
       if (sending) return;
       if (S.i >= S.q.length - 1) return finish();
       S.i++; save(S);
       open();
     }
+    function skip() {
+      if (!S || sending) return;
+      if (!sent()) { S.d.push(S.i); markMailed(S.q[S.i][4]); save(S); note('Skipped ' + S.q[S.i][1] + '.', true); }
+      next();
+    }
 
     function step() {
       if (!S || sending) return;
       if (sent()) return next();
       if (!onPage()) return open();
-      if (wait() > 0 || !filled() || Date.now() - filledAt < SETTLE_MS) return;   // Torn's 10 s gap / mail still loading
+      if (wait() > 0) return;   // Torn's 10 s gap
+      if (!filled()) return filling || fill();   // form re-rendered or not found: fill it again
       const b = sendButton();
       if (!b) return note("Torn's Send button was not found.");
       if (b.disabled) return note("Torn's Send button is disabled - wait for its countdown.");
@@ -1084,107 +1041,39 @@
       show();
     }
 
-    const getKey = () => localStorage.getItem(KEY_HK) || 'ArrowRight';
-    let held = false, capturing = false;
-
-    document.addEventListener('keydown', e => {
-      if (capturing || e.code !== getKey()) return;
-      if (e.repeat || held) return;   // a held key never repeats
-      held = true;
-      const a = document.activeElement || {};
-      if (!e.isTrusted || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
-      if (/^(INPUT|TEXTAREA|SELECT|IFRAME)$/.test(a.tagName) || a.isContentEditable) return;
-      e.preventDefault();
-      step();
-    }, true);
-    document.addEventListener('keyup', e => { if (e.code === getKey()) held = false; }, true);
-    window.addEventListener('blur', () => { held = false; });
-
-    function chooseKey() {
-      capturing = true;
-      show();
-      document.addEventListener('keydown', function pick(e) {
-        if (/^(Shift|Control|Alt|Meta)$/.test(e.key)) return;
-        e.preventDefault();
-        e.stopPropagation();
-        document.removeEventListener('keydown', pick, true);
-        if (e.key !== 'Escape') localStorage.setItem(KEY_HK, e.code);
-        held = e.key !== 'Escape';
-        capturing = false;
-        show();
-      }, true);
-    }
-
-    const panel = document.createElement('div');
-    panel.id = 'ffq-panel';
-    panel.style.cssText = 'position:relative;box-sizing:border-box;display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:8px;width:auto;margin:8px 0;background:#1f2933;color:#e6e6e6;border:1px solid #4a4f57;border-radius:6px;padding:34px 10px 10px;font:bold 13px Arial,sans-serif';
-
-    const grip    = handle('▼', '', 'position:absolute;top:4px;left:4px;cursor:pointer;font-size:16px;padding:4px 10px');
-    const info    = document.createElement('span');
-    info.style.cssText = 'flex:1 1 100%;text-align:center;font-size:14px';
-    grip.className = info.className = 'ffq-keep';
-    const btnRow  = document.createElement('div');
-    btnRow.style.cssText = 'display:flex;flex-wrap:nowrap;gap:8px;flex:1 1 100%;min-width:0';
+    const P = makePanel(step, () => { sessionStorage.removeItem(KEY); S = null; }, true);
     const sendBtn = button('#15803d', step);
-    const nextBtn = button('#00ADB5', () => onPage() ? next() : open());
-    const keyBtn  = button('#374151', chooseKey);
-    if (isPDA) keyBtn.style.display = 'none';   // no keyboard shortcuts on PDA
-    keyBtn.title  = 'Click, then press the key you want for SEND / NEXT';
-    const stopBtn = button('#7a1a1a', () => { localStorage.removeItem(KEY); S = null; panel.remove(); });
-    stopBtn.textContent = '✕';
-    stopBtn.className = 'ffq-keep';
-    stopBtn.style.cssText += ';position:absolute;top:4px;right:4px;padding:3px 10px;font-size:13px';
-    [[sendBtn, '3 1 0'], [nextBtn, '1.3 1 0']].forEach(([b, f]) => {
-      b.style.cssText += ';box-sizing:border-box;flex:' + f + ';height:40px;padding:0 8px;white-space:nowrap;overflow:hidden;min-width:0;text-align:center';
-    });
-    btnRow.append(sendBtn, nextBtn);
-    panel.append(grip, info, btnRow, keyBtn, stopBtn);
+    const skipBtn = button('#4a4f57', skip);
+    skipBtn.textContent = 'SKIP ⏭';
+    skipBtn.title = 'Skip this mail without sending; it is left out of later queues';
+    flexBtn(sendBtn, '1 1 0');
+    flexBtn(skipBtn, '0 0 auto');
+    P.btnRow.append(sendBtn, skipBtn);
 
-    // PDA: tabs cannot message each other, so this link hands the marketing page the ids of the mails sent (in the #hash)
+    // mails done here go back to the marketing page, which leaves them out of the next queue
     const panelUrl = () => 'https://ffscouter.com/supportpanel/payment-provider/loss-buy-marketing#ffmailed=' +
-      encodeURIComponent(Object.keys(mailedLedger()).join(','));
-    const backLink = (text, css) => {
-      const a = document.createElement('a');
-      a.textContent = text;
-      a.title = 'Back to the marketing page; mails sent here are left out of the next queue';
-      a.style.cssText = 'color:#fff;background:#374151;border-radius:6px;text-decoration:none;font:bold 13px Arial,sans-serif;padding:4px 10px;' + css;
-      a.addEventListener('click', () => { a.href = panelUrl(); });
-      a.href = panelUrl();
-      return a;
-    };
-    if (isPDA) { const pl = backLink('Panel ↩', 'position:absolute;top:4px;left:44px'); pl.className = 'ffq-keep'; panel.append(pl); }
-    function finished() {
-      if (!isPDA) return;
-      const b = document.createElement('div');
-      b.style.cssText = 'margin:8px 0;padding:10px;text-align:center;background:#14532d;color:#d1fae5;border:1px solid #22c55e;border-radius:6px;font:bold 14px Arial,sans-serif';
-      b.append('Mail queue finished ✓ ', backLink('Back to panel ↩', 'margin-left:8px'));
-      dockHost().prepend(b);
-    }
-
-    dockPanel(panel, grip, () => S);
+      encodeURIComponent(Object.keys(mailed()).join(','));
+    const finished = backTools(P.panel, panelUrl, 'Back to the marketing page; mails sent here are left out of the next queue', 'Mail queue finished ✓ ');
+    dockPanel(P.panel, P.grip, () => S);
 
     function show() {
       if (!S) return;
       if (sending) watchSend();
       if (!S) return;
       const it = S.q[S.i], here = onPage();
-      info.textContent = 'Mail #' + (S.i + 1) + '/' + S.q.length + ' · ' + it[1] + ' [' + it[0] + ']' + (here ? '' : ' · ⚠ not open');
+      P.info.textContent = 'Mail #' + (S.i + 1) + '/' + S.q.length + ' · ' + it[1] + ' [' + it[0] + ']' + (here ? '' : ' · ⚠ not open');
 
       let text, bg;
       if (sent())               { text = 'SENT ✓ · NEXT ▶'; bg = '#00ADB5'; }
       else if (!here)           { text = 'OPEN MAIL ▶';     bg = '#00ADB5'; }
       else if (sending)         { text = 'SENDING…';        bg = '#4a4f57'; }
       else if (wait() > 0)      { text = 'WAIT ' + (Math.ceil(wait() / 100) / 10).toFixed(1) + 's'; bg = '#4a4f57'; }
-      else if (!filled())       { text = 'FILLING…';        bg = '#4a4f57'; }
-      else if (Date.now() - filledAt < SETTLE_MS) { text = 'CHECK MAIL…'; bg = '#4a4f57'; }
+      else if (!filled())       { text = filling ? 'FILLING…' : 'FILL MAIL ▶'; bg = filling ? '#4a4f57' : '#00ADB5'; }
       else                      { text = 'SEND MAIL → ' + it[1]; bg = '#15803d'; }
       sendBtn.textContent = text;
       sendBtn.style.background = bg;
-
-      nextBtn.textContent = !here ? 'Open ▶' : (S.i === S.q.length - 1 ? 'Finish' : 'Next ▶');
-      nextBtn.style.opacity = sending ? '0.5' : '1';
-      keyBtn.textContent  = capturing ? 'Press a key…' : 'Key: ' + keyName(getKey());
-      fit(sendBtn, 14); fit(nextBtn, 14);
+      skipBtn.style.display = sending || sent() ? 'none' : '';
+      fit(sendBtn, 14);
     }
 
     if (onPage() && !sent()) fill();
