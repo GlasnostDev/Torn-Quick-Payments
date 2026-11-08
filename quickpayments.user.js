@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FFScouter - Profile Payment Pre-fill & Mail Pre-fill
 // @namespace    https://ffscouter.com/
-// @version      5.0
+// @version      5.1
 // @description  Pre-fills profile send-money (paymentamount, paymentref) and messages.php compose (mailsubject, mailbody). Added: FFScouter payment queue with a movable, resizable panel (two-step SEND by click or hotkey, delay between payments, VAULT or ghost-trade shortfall button), item.php send pre-fill (e.g. Xanax), a property ID / market price / happiness bar, and an outreach mail queue (loss-buy-marketing to Torn compose, 10 s gap between mails).
 // @author       FFScouter / Glasnost [1844049] & Solenya [4053619]
 // @match        https://www.torn.com/profiles.php*
@@ -262,7 +262,7 @@
   const q    = new URLSearchParams(location.search);
   const path = location.pathname;
 
-  const VERSION    = '6.8';   // keep in sync with @version above
+  const VERSION    = '5.1';   // keep in sync with @version above
   const UPDATE_URL = 'https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js';   // empty = update check off
   const isPDA      = typeof window.flutter_inappwebview !== 'undefined' || /TornPDA/i.test(navigator.userAgent);
 
@@ -648,11 +648,9 @@
     // claimed rows only: the "Clicked" list below has no data-compose-assign and is never queued
     const links  = () => [...document.querySelectorAll('#outreach-rows a[data-compose-assign]')]
       .filter(a => !a.closest('#outreach-clicked-wrap') && /^\d+$/.test(a.dataset.composeAssign));
-    // only the newest batch is queued (the page keeps older batches listed after "Request more")
+    // every listed batch is queued, minus the mails already done from this browser
     const boxOf   = a => a.closest('.border') || a.parentElement;
-    const batchOf = a => { const m = /Batch #(\d+)/.exec(boxOf(a).textContent); return m ? Number(m[1]) : 0; };
-    const latest  = () => Math.max(0, ...links().map(batchOf));
-    const usable  = () => { const l = mailed(), b = latest(); return links().filter(a => batchOf(a) === b && !l[a.dataset.composeAssign]).map(row).filter(Boolean); };
+    const usable  = () => { const l = mailed(); return links().filter(a => !l[a.dataset.composeAssign]).map(row).filter(Boolean); };
 
     function queueUrl() {
       const queue = usable();
@@ -661,7 +659,7 @@
       return 'https://www.torn.com/messages.php?ffmail=0#/p=compose&XID=' + queue[0][0] + '&ffm=' + encodeURIComponent(b64);
     }
 
-    queueLauncher(usable, n => n ? 'Send ' + n + ' mail' + (n > 1 ? 's' : '') + (latest() ? ' (Batch #' + latest() + ')' : '') + ' to Torn queue' : 'No mails to send', queueUrl, () => {
+    queueLauncher(usable, n => n ? 'Send ' + n + ' mail' + (n > 1 ? 's' : '') + ' to Torn queue' : 'No mails to send', queueUrl, () => {
       // dim the rows already done from this browser (the panel counts them once Torn's logs confirm)
       const l = mailed();
       links().forEach(a => {
