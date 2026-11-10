@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FFScouter - Profile Payment Pre-fill & Mail Pre-fill
 // @namespace    https://ffscouter.com/
-// @version      5.1
+// @version      5.2
 // @description  Pre-fills profile send-money (paymentamount, paymentref) and messages.php compose (mailsubject, mailbody). Added: FFScouter payment queue with a movable, resizable panel (two-step SEND by click or hotkey, delay between payments, VAULT or ghost-trade shortfall button), item.php send pre-fill (e.g. Xanax), a property ID / market price / happiness bar, and an outreach mail queue (loss-buy-marketing to Torn compose, 10 s gap between mails).
 // @author       FFScouter / Glasnost [1844049] & Solenya [4053619]
 // @match        https://www.torn.com/profiles.php*
@@ -11,6 +11,8 @@
 // @match        https://www.torn.com/trade.php*
 // @match        https://ffscouter.com/supportpanel/payment-provider*
 // @match        https://www.ffscouter.com/supportpanel/payment-provider*
+// @match        https://ffscouter.com/supportpanel/mortgages/marketing*
+// @match        https://www.ffscouter.com/supportpanel/mortgages/marketing*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @updateURL    https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js
 // @downloadURL  https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js
@@ -262,7 +264,7 @@
   const q    = new URLSearchParams(location.search);
   const path = location.pathname;
 
-  const VERSION    = '5.1';   // keep in sync with @version above
+  const VERSION    = '5.2';   // keep in sync with @version above
   const UPDATE_URL = 'https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js';   // empty = update check off
   const isPDA      = typeof window.flutter_inappwebview !== 'undefined' || /TornPDA/i.test(navigator.userAgent);
 
@@ -551,7 +553,7 @@
     setInterval(() => { if (alive() && !panel.isConnected) put(); }, 500);   // Torn re-renders the page
   }
 
-  if (/(^|\.)ffscouter\.com$/.test(location.hostname)) return /\/loss-buy-marketing\/?$/.test(path) ? outreachSender() : ffscouterSender();
+  if (/(^|\.)ffscouter\.com$/.test(location.hostname)) return /\/(loss-buy-marketing|mortgages\/marketing)\/?$/.test(path) ? outreachSender() : ffscouterSender();
   if (path === '/properties.php') { propertiesPage(); if (q.has('ffvault')) queuePanel(); return; }
   if (path === '/trade.php')      { if (q.has('fftrade')) queuePanel(); return; }
   if (path === '/item.php')       return itemPrefill().catch(e => console.error('[FFScouter item]', e));
@@ -568,6 +570,10 @@
 
     const usable = () => { const l = ledger(KEY_SENT, SENT_TTL); return [...document.querySelectorAll('#claimed-jobs .job-card[data-job-status="pending"] a[data-receiver-link]')]
       .filter(a => { const u = new URL(a.href), p = u.searchParams; return u.pathname === '/profiles.php' && p.get('XID') && p.get('paymentamount') && p.get('paymentref') && !l[code(p.get('paymentref'))]; }); };   // profile pay links only, never a mail Compose link
+
+    // the receiver's name as the job card shows it, "Name [XID]"; '' if the card has none
+    const nameOf = (a, x) => { const card = a.closest('.job-card'), m = card && card.textContent.match(new RegExp('([\\w-]+)\\s*\\[' + x + '\\]'));
+      return m ? m[1] : ''; };
 
     const jobId = a => {
       const card = a.closest('.job-card'), b = card && card.querySelector('[data-release]');
@@ -615,7 +621,7 @@
         const ref = p.get('paymentref');
         return [p.get('XID'), p.get('paymentamount'),
                 sfx && ref.endsWith(sfx) ? ref.slice(0, -sfx.length) + '§' : ref,   // § = shared ending, kept once
-                p.get('anonymous') === '1' ? 1 : 0, jobId(links[i])];
+                p.get('anonymous') === '1' ? 1 : 0, jobId(links[i]), nameOf(links[i], p.get('XID'))];
       });
       const b64 = btoa(unescape(encodeURIComponent(JSON.stringify({ s: sfx, q: queue, c: cashSrc() }))));
       // first player's profile without the pay pre-fill: if Torn knows that job is already paid, it moves on to the
@@ -654,7 +660,7 @@
 
     function queueUrl() {
       const queue = usable();
-      const b64 = btoa(unescape(encodeURIComponent(JSON.stringify({ q: queue }))));
+      const b64 = btoa(unescape(encodeURIComponent(JSON.stringify({ q: queue, b: /mortgages/.test(path) ? 'm' : '' }))));
       // the queue rides in the #hash, which never reaches a server; the first mail's compose page opens with its recipient
       return 'https://www.torn.com/messages.php?ffmail=0#/p=compose&XID=' + queue[0][0] + '&ffm=' + encodeURIComponent(b64);
     }
@@ -850,7 +856,7 @@
     function show() {
       if (!S) return;
       const it = S.q[S.i], here = onPage(S), n = need(S), amt = '$' + Number(it[1]).toLocaleString('en-US');
-      P.info.textContent = '#' + (S.i + 1) + '/' + S.q.length + ' · [' + it[0] + '] · ' + amt +
+      P.info.textContent = '#' + (S.i + 1) + '/' + S.q.length + ' · ' + (it[5] ? it[5] + ' ' : '') + '[' + it[0] + '] · ' + amt +
         (atVault ? ' · VAULT' : atTrade ? ' · TRADE' + (n ? ' · take out $' + n.toLocaleString('en-US') : '') : here ? '' : ' · ⚠ not on this player');
 
       let text, bg;
@@ -915,7 +921,7 @@
         const l = mailed();
         const rows = p.q.filter(r => /^\d+$/.test(r[0]) && r[2] && r[3]);
         const fresh = rows.filter(r => !l[r[4]]);
-        if (fresh.length) save({ q: fresh, i: 0, d: [] });
+        if (fresh.length) save({ q: fresh, i: 0, d: [], b: p.b === 'm' ? 'm' : '' });
         else sessionStorage.removeItem(KEY);
         history.replaceState(null, '', location.pathname + location.search + '#/p=compose&XID=' + pageXID);
         const skipped = rows.length - fresh.length;
@@ -1049,7 +1055,7 @@
     P.btnRow.append(sendBtn, skipBtn);
 
     // mails done here go back to the marketing page, which leaves them out of the next queue
-    const panelUrl = () => 'https://ffscouter.com/supportpanel/payment-provider/loss-buy-marketing#ffmailed=' +
+    const panelUrl = () => 'https://ffscouter.com/supportpanel/' + (S && S.b === 'm' ? 'mortgages/marketing' : 'payment-provider/loss-buy-marketing') + '#ffmailed=' +
       encodeURIComponent(Object.keys(mailed()).join(','));
     const finished = backTools(P.panel, panelUrl, 'Back to the marketing page; mails sent here are left out of the next queue', 'Mail queue finished ✓ ');
     dockPanel(P.panel, P.grip, () => S);
