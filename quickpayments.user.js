@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FFScouter - Profile Payment Pre-fill & Mail Pre-fill
 // @namespace    https://ffscouter.com/
-// @version      5.2
+// @version      5.3
 // @description  Pre-fills profile send-money (paymentamount, paymentref) and messages.php compose (mailsubject, mailbody). Added: FFScouter payment queue with a movable, resizable panel (two-step SEND by click or hotkey, delay between payments, VAULT or ghost-trade shortfall button), item.php send pre-fill (e.g. Xanax), a property ID / market price / happiness bar, and an outreach mail queue (loss-buy-marketing to Torn compose, 10 s gap between mails).
 // @author       FFScouter / Glasnost [1844049] & Solenya [4053619]
 // @match        https://www.torn.com/profiles.php*
@@ -257,16 +257,75 @@
 
 })();
 
-// SOLENYA ADDITIONS // 
+// SOLENYA ADDITIONS //
 (function () {
   'use strict';
 
   const q    = new URLSearchParams(location.search);
   const path = location.pathname;
 
-  const VERSION    = '5.2';   // keep in sync with @version above
+  const VERSION    = '5.4';   // keep in sync with @version above
   const UPDATE_URL = 'https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js';   // empty = update check off
   const isPDA      = typeof window.flutter_inappwebview !== 'undefined' || /TornPDA/i.test(navigator.userAgent);
+  // layout only (compact panel styles below); PDA-only behaviour still keys off isPDA
+  const isMobile   = isPDA || window.innerWidth <= 768 || /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+
+  if (!document.getElementById('ffq-compact-ui')) {
+    const st = document.createElement('style');
+    st.id = 'ffq-compact-ui';
+    st.textContent = `
+      #ffq-panel {
+        background: linear-gradient(135deg, #131722 0%, #1a2234 100%) !important;
+        border: 1px solid rgba(255, 255, 255, 0.1) !important;
+        border-radius: 8px !important;
+        box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.6) !important;
+        font-family: ui-sans-serif, system-ui, -apple-system, sans-serif !important;
+        color: #f3f4f6 !important;
+        padding: 8px 12px !important;
+        margin: 6px 0 12px 0 !important;
+        display: flex !important;
+        align-items: center !important;
+        flex-wrap: wrap !important;
+        gap: 8px !important;
+      }
+      #ffq-panel[data-min="1"] { padding: 6px 12px !important; }
+      #ffq-panel[data-min="1"] > :not(.ffq-keep) { display: none !important; }
+
+      #ffq-panel button, .ffq-btn-modern {
+        font-family: ui-sans-serif, system-ui, sans-serif !important;
+        font-weight: 600 !important;
+        font-size: 12px !important;
+        border-radius: 6px !important;
+        transition: background-color 0.15s ease, filter 0.15s ease !important;
+        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        cursor: pointer;
+        padding: 6px 10px !important;
+        height: 34px !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        white-space: nowrap !important;
+      }
+      #ffq-panel button:hover:not(:disabled), .ffq-btn-modern:hover:not(:disabled) { filter: brightness(1.15) !important; }
+      #ffq-panel button.ffq-send-main { height: 52px !important; font-size: 14px !important; }
+      #ffq-panel a.ffq-panel-chip { height: 26px !important; padding: 2px 8px !important; font-size: 11px !important; flex: 0 0 auto !important; }
+      #ffq-note {
+        background: #131722 !important;
+        border: 1px solid rgba(255, 255, 255, 0.15) !important;
+        border-radius: 8px !important;
+        box-shadow: 0 10px 20px rgba(0,0,0,0.5) !important;
+        font-family: ui-sans-serif, system-ui, sans-serif !important;
+      }
+      .ffq-chip {
+        background: rgba(17, 24, 39, 0.9) !important;
+        border: 1px solid rgba(255, 255, 255, 0.15) !important;
+        border-radius: 6px !important;
+        font-family: ui-sans-serif, system-ui, sans-serif !important;
+      }
+      .ffq-chip-link { background: #0284c7 !important; }
+    `;
+    document.head.appendChild(st);
+  }
 
   // ── update check: once every 30 min, shows a dismissible banner when UPDATE_URL has a newer @version ──
   function updateCheck() {
@@ -283,7 +342,7 @@
       if (st.dismissed === v || document.getElementById('ffq-update')) return;
       const b = document.createElement('div');
       b.id = 'ffq-update';
-      b.style.cssText = 'position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:2147483647;display:flex;align-items:center;gap:10px;max-width:94vw;background:#1e3a5f;color:#e0f2fe;border:1px solid #3b82f6;border-radius:8px;padding:8px 10px;font:bold 13px Arial,sans-serif;box-shadow:0 4px 18px rgba(0,0,0,.55)';
+      b.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:2147483647;display:flex;align-items:center;gap:10px;max-width:92vw;background:#1e3a8a;color:#f0f9ff;border:1px solid #3b82f6;border-radius:8px;padding:8px 14px;font:600 12px ui-sans-serif,sans-serif;box-shadow:0 10px 20px rgba(0,0,0,0.5)';
       const t = document.createElement('span');
       t.textContent = 'FFScouter ' + v + ' is available (you have ' + VERSION + ')';
       const a = document.createElement('a');
@@ -291,10 +350,11 @@
       a.href = UPDATE_URL;
       a.target = '_blank';
       a.rel = 'noopener noreferrer';
-      a.style.cssText = 'background:#15803d;color:#fff;text-decoration:none;border-radius:6px;padding:6px 12px';
+      a.className = 'ffq-btn-modern';
+      a.style.cssText = 'background:#16a34a;color:#fff;text-decoration:none;padding:4px 10px;height:26px !important;';
       const x = document.createElement('span');
       x.textContent = '✕';
-      x.style.cssText = 'cursor:pointer;padding:4px 6px;color:#9aa7b2';
+      x.style.cssText = 'cursor:pointer;padding:2px 4px;color:#93c5fd;font-weight:bold';
       x.onclick = () => { st.dismissed = v; try { localStorage.setItem(KEY_UPD, JSON.stringify(st)); } catch (e) {} b.remove(); };
       b.append(t, a, x);
       document.body.appendChild(b);
@@ -327,19 +387,25 @@
   const button = (bg, fn) => {
     const b = document.createElement('button');
     b.type = 'button';
-    b.style.cssText = 'background:' + bg + ';color:#fff;border:0;border-radius:6px;padding:10px 14px;font:bold 14px Arial,sans-serif;cursor:pointer';
+    b.style.cssText = 'background:' + bg + ';color:#fff;border:0;cursor:pointer';
     b.addEventListener('click', e => { if (e.isTrusted) fn(); });
     return b;
   };
   // fixed proportions on one non-wrapping row: the label shrinks to fit instead of the button resizing
-  const flexBtn = (b, f) => { b.style.cssText += ';box-sizing:border-box;flex:' + f + ';height:40px;padding:0 8px;white-space:nowrap;overflow:hidden;min-width:0;text-align:center'; };
-  const flexRow = () => { const r = document.createElement('div'); r.style.cssText = 'display:flex;flex-wrap:nowrap;gap:8px;flex:1 1 100%;min-width:0'; return r; };
+  const flexBtn = (b, f) => { b.style.cssText += ';box-sizing:border-box;flex:' + f + ';min-width:0;overflow:hidden;text-align:center'; };
+  const flexRow = () => {
+    const r = document.createElement('div');
+    r.style.cssText = isMobile
+      ? 'display:flex;flex-wrap:wrap;gap:6px;flex:1 1 100%;min-width:0;align-items:center;margin-top:4px;'
+      : 'display:flex;flex-wrap:nowrap;gap:6px;flex:1 1 auto;min-width:0;align-items:center';
+    return r;
+  };
   function fit(b, max) {
     if (b._fitText === b.textContent && b._fitW === b.clientWidth) return;
     b._fitText = b.textContent;
     let size = max;
-    b.style.fontSize = size + 'px';
-    while (b.clientWidth && b.scrollWidth > b.clientWidth && size > 8) b.style.fontSize = --size + 'px';
+    b.style.setProperty('font-size', size + 'px', 'important');   // beats the compact CSS's !important size
+    while (b.clientWidth && b.scrollWidth > b.clientWidth && size > 9) b.style.setProperty('font-size', (--size) + 'px', 'important');
     b._fitW = b.clientWidth;
   }
 
@@ -350,7 +416,7 @@
     const n = document.createElement('div');
     n.id = 'ffq-note';
     n.textContent = text;
-    n.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);z-index:2147483647;border-radius:6px;padding:8px 12px;font:bold 13px Arial,sans-serif;max-width:92vw;text-align:center;border:1px solid;bottom:' + (isPDA ? '84px' : '24px') + ';' +
+    n.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);z-index:2147483647;border-radius:6px;padding:8px 14px;font:600 12px ui-sans-serif,sans-serif;max-width:92vw;text-align:center;border:1px solid;bottom:' + (isMobile ? '84px' : '24px') + ';' +
       (ok === 'warn' ? 'background:#4a3a0a;color:#fde68a;border-color:#d4a017' : ok ? 'background:#14532d;color:#d1fae5;border-color:#22c55e' : 'background:#7a1a1a;color:#f8d7da;border-color:#e05555');
     n.onclick = () => n.remove();
     document.body.appendChild(n);
@@ -393,12 +459,13 @@
   const floatBtn = (bottom, bg) => {
     const b = document.createElement('button');
     b.type = 'button';
-    b.style.cssText = 'position:fixed;right:16px;bottom:' + bottom + 'px;z-index:2147483647;background:' + bg + ';color:#fff;border:0;border-radius:6px;padding:10px 14px;font:bold 14px Arial,sans-serif;cursor:pointer';
+    b.className = 'ffq-btn-modern';
+    b.style.cssText = 'position:fixed;right:16px;bottom:' + bottom + 'px;z-index:2147483647;background:' + bg + ';color:#fff;padding:10px 16px;font-size:13px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,0.4);';
     document.body.appendChild(b);
     return b;
   };
   function queueLauncher(usable, label, url, extra) {
-    const btn = floatBtn(16, '#ea580c');
+    const btn = floatBtn(16, '#059669');
     const refresh = () => {
       const n = usable().length;
       btn.textContent   = label(n);
@@ -437,14 +504,16 @@
 
     const panel = document.createElement('div');
     panel.id = 'ffq-panel';
-    panel.style.cssText = 'position:relative;box-sizing:border-box;display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:8px;width:auto;margin:8px 0;background:#1f2933;color:#e6e6e6;border:1px solid #4a4f57;border-radius:6px;padding:34px 10px 10px;font:bold 13px Arial,sans-serif';
+    if (isMobile) panel.style.cssText = 'display:flex !important;flex-direction:column !important;align-items:stretch !important;';
     const grip = document.createElement('span');
-    grip.style.cssText = 'color:#9aa7b2;user-select:none;-webkit-user-select:none;touch-action:none;position:absolute;top:4px;left:4px;cursor:pointer;font-size:16px;padding:4px 10px';
+    grip.style.cssText = 'color:#9ca3af;user-select:none;-webkit-user-select:none;cursor:pointer;font-size:14px;padding:2px 6px';
     const info = document.createElement('span');
-    info.style.cssText = 'flex:1 1 100%;text-align:center;font-size:14px';
+    info.style.cssText = isMobile
+      ? 'font-size:12px;font-weight:600;color:#f3f4f6;flex:1 1 auto;min-width:0;margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
+      : 'flex:1 1 auto;font-size:12px;font-weight:600;color:#f3f4f6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
     const btnRow = flexRow();
-    const keyLabel = () => { keyBtn.textContent = capturing ? 'Press a key…' : 'Key: ' + keyName(getKey()); };
-    const keyBtn = button('#374151', () => {
+    const keyLabel = () => { keyBtn.textContent = capturing ? 'Key…' : 'Key: ' + keyName(getKey()); };
+    const keyBtn = button('#334155', () => {
       capturing = true;
       keyLabel();
       document.addEventListener('keydown', function pick(e) {
@@ -461,11 +530,20 @@
     if (isPDA) keyBtn.style.display = 'none';   // no keyboard shortcuts on PDA
     keyBtn.title = 'Click, then press the key you want for the queue button';
     keyLabel();
-    const stopBtn = button('#7a1a1a', () => { stop(); panel.remove(); });
+    keyBtn.style.cssText += ';font-size:11px;padding:4px 8px;height:34px;border-radius:6px';
+    const stopBtn = button('#b91c1c', () => { stop(); panel.remove(); });
     stopBtn.textContent = '✕';
-    stopBtn.style.cssText += ';position:absolute;top:4px;right:4px;padding:3px 10px;font-size:13px';
-    grip.className = info.className = stopBtn.className = 'ffq-keep';
-    panel.append(grip, info, btnRow, keyBtn, stopBtn);
+    stopBtn.style.cssText += ';font-size:11px;padding:4px 8px;height:34px;border-radius:6px';
+    grip.className = info.className = stopBtn.className = keyBtn.className = 'ffq-keep';
+    if (isMobile) {
+      // narrow screens: grip, info and ✕ on a top bar, the buttons stacked below
+      const topBar = document.createElement('div');
+      topBar.style.cssText = 'display:flex;align-items:center;width:100%;justify-content:space-between;';
+      topBar.className = 'ffq-keep';
+      topBar.dataset.ffqTopbar = '1';
+      topBar.append(grip, info, stopBtn);
+      panel.append(topBar, btnRow, keyBtn);
+    } else panel.append(grip, info, btnRow, keyBtn, stopBtn);
 
     function onKey(e) {
       if (capturing || e.code !== getKey()) return;
@@ -493,7 +571,8 @@
       const a = document.createElement('a');
       a.textContent = text;
       a.title = title;
-      a.style.cssText = 'color:#fff;background:#374151;border-radius:6px;text-decoration:none;font:bold 13px Arial,sans-serif;padding:4px 10px;' + css;
+      a.className = 'ffq-btn-modern';
+      a.style.cssText = 'color:#fff;background:#334155;text-decoration:none;font:600 12px ui-sans-serif,sans-serif;padding:4px 8px;' + css;
       a.addEventListener('click', e => {
         a.href = panelUrl();
         if (window.opener && !window.opener.closed) { e.preventDefault(); closeTab(panelUrl(), () => { location.href = panelUrl(); }); }
@@ -501,12 +580,17 @@
       a.href = panelUrl();
       return a;
     };
-    if (isPDA) { const pl = backLink('Panel ↩', 'position:absolute;top:4px;left:44px'); pl.className = 'ffq-keep'; panel.append(pl); }
+    if (isPDA) {
+      const pl = backLink('Panel ↩', 'margin-left:4px;');
+      pl.className = 'ffq-keep ffq-btn-modern ffq-panel-chip';
+      const topBar = panel.querySelector('[data-ffq-topbar]');
+      if (topBar) topBar.insertBefore(pl, topBar.querySelector('button')); else panel.append(pl);
+    }
     return () => {
       setTimeout(() => closeTab(panelUrl()), 1500);   // long enough to read the "finished" note
       if (!isPDA) return;
       const b = document.createElement('div');
-      b.style.cssText = 'margin:8px 0;padding:10px;text-align:center;background:#14532d;color:#d1fae5;border:1px solid #22c55e;border-radius:6px;font:bold 14px Arial,sans-serif';
+      b.style.cssText = 'margin:8px 0;padding:10px;text-align:center;background:#059669;color:#fff;border-radius:8px;font:600 13px ui-sans-serif,sans-serif';
       b.append(doneText, backLink('Back to panel ↩', 'margin-left:8px'));
       dockHost().prepend(b);
     };
@@ -613,7 +697,9 @@
     srcBtn.addEventListener('click', () => { localStorage.setItem(KEY_SRC, cashSrc() === 'trade' ? 'vault' : 'trade'); refresh(); });
 
     function queueUrl() {
-      const links = usable();
+      // biggest payment first: if you get mugged mid-queue, less cash is on hand
+      const amt   = a => Number(new URL(a.href).searchParams.get('paymentamount')) || 0;
+      const links = usable().sort((a, b) => amt(b) - amt(a));
       const rows  = links.map(a => new URL(a.href).searchParams);
       const ref0  = rows[0].get('paymentref');
       const sfx   = ref0.indexOf(' ') < 0 ? '' : ref0.slice(ref0.indexOf(' '));
@@ -626,7 +712,8 @@
       const b64 = btoa(unescape(encodeURIComponent(JSON.stringify({ s: sfx, q: queue, c: cashSrc() }))));
       // first player's profile without the pay pre-fill: if Torn knows that job is already paid, it moves on to the
       // first unpaid player itself, and an empty form there can never pay them twice
-      return 'https://www.torn.com/profiles.php?XID=' + rows[0].get('XID') + '&ffq=' + encodeURIComponent(b64);
+      // the queue rides in the #hash, which never reaches Torn's server (a long ?ffq= got bounced to your last page)
+      return 'https://www.torn.com/profiles.php?XID=' + rows[0].get('XID') + '#ffq=' + encodeURIComponent(b64);
     }
 
     const refresh = queueLauncher(usable, n => n ? 'Send ' + n + ' to Torn queue' : 'No pending payments', queueUrl,
@@ -712,9 +799,10 @@
       } catch (e) {}
     });
 
-    if (q.get('ffq')) {
+    const ffq = new URLSearchParams(location.hash.slice(1)).get('ffq') || q.get('ffq');
+    if (ffq) {
       try {
-        const p = JSON.parse(decodeURIComponent(escape(atob(q.get('ffq')))));
+        const p = JSON.parse(decodeURIComponent(escape(atob(ffq))));
         const l = ledger(KEY_SENT, SENT_TTL);
         const rows = p.q.filter(r => /^\d+$/.test(r[0]) && /^\d+$/.test(r[1]));
         const fresh = rows.filter(r => !l[String(r[2]).replace('§', () => p.s || '').trim()]);
@@ -728,6 +816,7 @@
         // one page load - nothing is loaded on Torn without your input
         const u = new URL(location.href);
         u.searchParams.delete('ffq');
+        u.hash = '';
         history.replaceState(null, '', u);
       } catch (e) { console.warn('[FFScouter] Could not read queue from URL', e); }
     }
@@ -825,10 +914,11 @@
 
     const P = makePanel(step, () => { localStorage.removeItem(KEY); S = null; }, false);
     P.keyBtn.title = 'Click, then press the key you want for SEND / CONFIRM / NEXT';
-    const sendBtn  = button('#15803d', step);
-    const vaultBtn = button('#ea580c', toCash);
-    const srcBtn   = button('#374151', () => { localStorage.setItem(KEY_SRC, src() === 'trade' ? 'vault' : 'trade'); show(); });
-    const releaseBtn = button('#92400e', () => {
+    const sendBtn  = button('#059669', step);
+    if (isMobile) sendBtn.classList.add('ffq-send-main');
+    const vaultBtn = button('#d97706', toCash);
+    const srcBtn   = button('#334155', () => { localStorage.setItem(KEY_SRC, src() === 'trade' ? 'vault' : 'trade'); show(); });
+    const releaseBtn = button('#b91c1c', () => {
       const it = S.q[S.i];
       if (!it[4] || paid(S) || !confirm('Release [' + it[0] + '] from the support panel queue? This skips them without paying.')) return;
       window.open('https://ffscouter.com/supportpanel/payment-provider?ffrelease=' + it[4], '_blank');
@@ -838,14 +928,18 @@
       if (S.i === S.q.length - 1) { note('Released · Queue finished ✓', true); return next(); }   // last player released: close the queue
       show();
     });
-    releaseBtn.textContent = 'Release';
+    releaseBtn.textContent = 'Rel';
     releaseBtn.title = 'Releases this job on the FFScouter support panel and skips it';
-    const nextBtn  = button('#00ADB5', () => onPage(S) ? next() : (location.href = urlFor(S, S.i)));
-    [[sendBtn, '3 1 0'], [nextBtn, '1.3 1 0'], [releaseBtn, '1 1 0'], [vaultBtn, '3 1 0'], [srcBtn, '1.3 1 0']].forEach(([b, f]) => flexBtn(b, f));
-    const cashRow  = flexRow();
-    P.btnRow.append(sendBtn, releaseBtn, nextBtn);
-    cashRow.append(vaultBtn, srcBtn);
-    P.btnRow.after(cashRow);
+    const nextBtn  = button('#0284c7', () => onPage(S) ? next() : (location.href = urlFor(S, S.i)));
+    if (isMobile) {
+      [[sendBtn, '1 1 100%'], [nextBtn, '1 1 48%'], [releaseBtn, '0 0 20%'], [vaultBtn, '1 1 48%'], [srcBtn, '1 1 48%']].forEach(([b, f]) => {
+        b.style.cssText += ';box-sizing:border-box;flex:' + f + ';min-width:0;text-align:center';
+      });
+      P.btnRow.append(sendBtn, vaultBtn, srcBtn, releaseBtn, nextBtn);
+    } else {
+      [[sendBtn, '2.5'], [nextBtn, '1'], [releaseBtn, '0.8'], [vaultBtn, '2.2'], [srcBtn, '1']].forEach(([b, f]) => flexBtn(b, f));
+      P.btnRow.append(sendBtn, releaseBtn, vaultBtn, srcBtn, nextBtn);
+    }
 
     // payments sent here go back to the support panel, which leaves them out of the next queue
     const panelUrl = () => 'https://ffscouter.com/supportpanel/payment-provider#ffsent=' +
@@ -860,31 +954,31 @@
         (atVault ? ' · VAULT' : atTrade ? ' · TRADE' + (n ? ' · take out $' + n.toLocaleString('en-US') : '') : here ? '' : ' · ⚠ not on this player');
 
       let text, bg;
-      if (atVault)         { text = withdrew || !n ? 'BACK TO QUEUE ▶' : 'WITHDRAW $' + n.toLocaleString('en-US'); bg = withdrew || !n ? '#00ADB5' : '#ea580c'; }
-      else if (atTrade)    { text = n ? 'BACK TO QUEUE ▶ · still short $' + n.toLocaleString('en-US') : 'BACK TO QUEUE ▶'; bg = n ? '#4a4f57' : '#00ADB5'; }
-      else if (paid(S))    { text = (S.r || []).indexOf(S.i) !== -1 ? 'RELEASED · NEXT ▶' : 'PAID ✓ · NEXT ▶'; bg = '#00ADB5'; }
-      else if (sending)    { text = 'SENDING…';        bg = '#4a4f57'; }
-      else if (wait() > 0) { text = 'WAIT ' + (Math.ceil(wait() / 100) / 10).toFixed(1) + 's'; bg = '#4a4f57'; }
-      else if (armed === S.i && Date.now() - armedAt <= ARM_MS) { text = 'CONFIRM ' + amt + ' → [' + it[0] + ']'; bg = '#1d4ed8'; }
-      else                 { text = 'SEND ' + amt + ' → [' + it[0] + ']'; bg = '#15803d'; }
+      if (atVault)         { text = withdrew || !n ? 'BACK ▶' : 'WITHDRAW $' + n.toLocaleString('en-US'); bg = withdrew || !n ? '#0284c7' : '#d97706'; }
+      else if (atTrade)    { text = n ? 'BACK ▶ · $' + n.toLocaleString('en-US') : 'BACK ▶'; bg = n ? '#334155' : '#0284c7'; }
+      else if (paid(S))    { text = (S.r || []).indexOf(S.i) !== -1 ? 'RELEASED · NEXT ▶' : 'PAID ✓ · NEXT ▶'; bg = '#0284c7'; }
+      else if (sending)    { text = 'SENDING…';        bg = '#334155'; }
+      else if (wait() > 0) { text = 'WAIT ' + (Math.ceil(wait() / 100) / 10).toFixed(1) + 's'; bg = '#334155'; }
+      else if (armed === S.i && Date.now() - armedAt <= ARM_MS) { text = 'CONFIRM ' + amt; bg = '#2563eb'; }
+      else                 { text = 'SEND ' + amt; bg = '#059669'; }
       sendBtn.textContent = text;
       sendBtn.style.background = bg;
       sendBtn.style.display = here || atVault || atTrade ? '' : 'none';
 
       releaseBtn.style.display = it[4] && !paid(S) && !atVault && !atTrade ? '' : 'none';
       // the vault / trade toggle is always on show, so the choice can be made before any cash runs short
-      cashRow.style.display = !atVault && !atTrade ? 'flex' : 'none';
-      vaultBtn.style.display = n > 0 ? '' : 'none';
+      vaultBtn.style.display = n > 0 && !atVault && !atTrade ? '' : 'none';
+      srcBtn.style.display = !atVault && !atTrade ? '' : 'none';
       const viaTrade = src() === 'trade';
       vaultBtn.textContent = (viaTrade ? 'TRADE $' : 'VAULT $') + n.toLocaleString('en-US');
       vaultBtn.title = viaTrade
         ? 'Opens your ghost trade (the last trade you opened from the queue) to take out $' + n.toLocaleString('en-US') + ', the cash the rest of the queue still needs'
         : 'Opens your vault with $' + n.toLocaleString('en-US') + ' pre-filled (cash the rest of the queue still needs)';
-      srcBtn.textContent = 'Cash from: ' + (viaTrade ? 'Trade' : 'Vault') + ' ⇄';
+      srcBtn.textContent = viaTrade ? 'Trade ⇄' : 'Vault ⇄';
       srcBtn.title = 'Click to take short cash from your ' + (viaTrade ? 'vault' : 'ghost trade') + ' instead. Remembered for every queue.';
 
       nextBtn.textContent = !here ? 'Open ▶' : (S.i === S.q.length - 1 ? 'Finish' : 'Next ▶');
-      fit(sendBtn, 14); fit(nextBtn, 14); fit(vaultBtn, 14); fit(srcBtn, 14);
+      fit(sendBtn, isMobile ? 14 : 12); fit(nextBtn, 12); fit(vaultBtn, 12); fit(srcBtn, 12); fit(releaseBtn, 12);
     }
 
     show();
@@ -1046,12 +1140,16 @@
     }
 
     const P = makePanel(step, () => { sessionStorage.removeItem(KEY); S = null; }, true);
-    const sendBtn = button('#15803d', step);
-    const skipBtn = button('#4a4f57', skip);
-    skipBtn.textContent = 'SKIP ⏭';
+    const sendBtn = button('#059669', step);
+    if (isMobile) sendBtn.classList.add('ffq-send-main');
+    const skipBtn = button('#334155', skip);
+    skipBtn.textContent = 'Skip';
     skipBtn.title = 'Skip this mail without sending; it is left out of later queues';
-    flexBtn(sendBtn, '1 1 0');
-    flexBtn(skipBtn, '0 0 auto');
+    if (isMobile) {
+      [sendBtn, skipBtn].forEach(b => { b.style.cssText += ';box-sizing:border-box;flex:1 1 100%;min-width:0;text-align:center'; });
+    } else {
+      [[sendBtn, '3'], [skipBtn, '1']].forEach(([b, f]) => flexBtn(b, f));
+    }
     P.btnRow.append(sendBtn, skipBtn);
 
     // mails done here go back to the marketing page, which leaves them out of the next queue
@@ -1068,16 +1166,16 @@
       P.info.textContent = 'Mail #' + (S.i + 1) + '/' + S.q.length + ' · ' + it[1] + ' [' + it[0] + ']' + (here ? '' : ' · ⚠ not open');
 
       let text, bg;
-      if (sent())               { text = 'SENT ✓ · NEXT ▶'; bg = '#00ADB5'; }
-      else if (!here)           { text = 'OPEN MAIL ▶';     bg = '#00ADB5'; }
-      else if (sending)         { text = 'SENDING…';        bg = '#4a4f57'; }
-      else if (wait() > 0)      { text = 'WAIT ' + (Math.ceil(wait() / 100) / 10).toFixed(1) + 's'; bg = '#4a4f57'; }
-      else if (!filled())       { text = filling ? 'FILLING…' : 'FILL MAIL ▶'; bg = filling ? '#4a4f57' : '#00ADB5'; }
-      else                      { text = 'SEND MAIL → ' + it[1]; bg = '#15803d'; }
+      if (sent())               { text = 'SENT ✓ · NEXT ▶'; bg = '#0284c7'; }
+      else if (!here)           { text = 'OPEN ▶';          bg = '#0284c7'; }
+      else if (sending)         { text = 'SENDING…';        bg = '#334155'; }
+      else if (wait() > 0)      { text = 'WAIT ' + (Math.ceil(wait() / 100) / 10).toFixed(1) + 's'; bg = '#334155'; }
+      else if (!filled())       { text = filling ? 'FILLING…' : 'FILL ▶'; bg = filling ? '#334155' : '#0284c7'; }
+      else                      { text = 'SEND → ' + it[1]; bg = '#059669'; }
       sendBtn.textContent = text;
       sendBtn.style.background = bg;
       skipBtn.style.display = sending || sent() ? 'none' : '';
-      fit(sendBtn, 14);
+      fit(sendBtn, isMobile ? 14 : 12);
     }
 
     if (onPage() && !sent()) fill();
@@ -1102,8 +1200,8 @@
     const chip = (text, href) => {
       const c = document.createElement(href ? 'a' : 'span');
       c.textContent = text;
-      c.style.cssText = 'padding:3px 7px;border-radius:4px;border:1px solid rgba(255,255,255,.16);white-space:nowrap;color:#fff;text-decoration:none;' +
-        (href ? 'background:#0b7285;pointer-events:auto;cursor:pointer' : 'background:rgba(15,20,25,.85)');
+      c.className = 'ffq-chip' + (href ? ' ffq-chip-link' : '');
+      c.style.cssText = 'padding:3px 6px;font:600 11px/1.2 ui-sans-serif,sans-serif;white-space:nowrap;color:#fff;text-decoration:none;pointer-events:auto;display:inline-flex;align-items:center';
       if (href) {
         c.href = href;
         c.target = '_blank';
@@ -1122,7 +1220,7 @@
       });
       const bar = document.createElement('div');
       bar.className = 'ffq-bar';
-      bar.style.cssText = 'position:absolute;top:8px;left:8px;right:8px;z-index:6;display:flex;flex-wrap:wrap;gap:4px;pointer-events:none;font:bold 11px/1.2 Arial,sans-serif';
+      bar.style.cssText = 'position:absolute;top:8px;left:8px;right:8px;z-index:6;display:flex;flex-wrap:wrap;gap:4px;pointer-events:none';
       bar.appendChild(id === '0' ? chip('ID 0')   // default shack has no real ID
                                  : chip('ID ' + id + ' ↗', 'https://ffscouter.com/supportpanel/mortgages/by-property/' + id));
       if (info['Market price']) bar.appendChild(chip('Market ' + info['Market price']));
@@ -1152,7 +1250,7 @@
     function toast(text) {
       const d = document.createElement('div');
       d.textContent = text;
-      d.style.cssText = 'position:fixed;top:70px;left:50%;transform:translateX(-50%);z-index:999999;max-width:90vw;padding:10px 16px;border-radius:8px;font:bold 13px Arial,sans-serif;color:#111;background:#d4a017;box-shadow:0 4px 16px rgba(0,0,0,.5)';
+      d.style.cssText = 'position:fixed;top:70px;left:50%;transform:translateX(-50%);z-index:999999;max-width:90vw;padding:10px 16px;border-radius:8px;font:600 12px ui-sans-serif,sans-serif;color:#fff;background:#b45309;box-shadow:0 10px 20px rgba(0,0,0,0.5)';
       document.body.appendChild(d);
       setTimeout(() => d.remove(), 7000);
     }
