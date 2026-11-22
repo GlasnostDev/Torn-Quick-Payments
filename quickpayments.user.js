@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FFScouter - Profile Payment Pre-fill & Mail Pre-fill
 // @namespace    https://ffscouter.com/
-// @version      5.3
+// @version      5.4
 // @description  Pre-fills profile send-money (paymentamount, paymentref) and messages.php compose (mailsubject, mailbody). Added: FFScouter payment queue with a movable, resizable panel (two-step SEND by click or hotkey, delay between payments, VAULT or ghost-trade shortfall button), item.php send pre-fill (e.g. Xanax), a property ID / market price / happiness bar, and an outreach mail queue (loss-buy-marketing to Torn compose, 10 s gap between mails).
 // @author       FFScouter / Glasnost [1844049] & Solenya [4053619]
 // @match        https://www.torn.com/profiles.php*
@@ -13,6 +13,8 @@
 // @match        https://www.ffscouter.com/supportpanel/payment-provider*
 // @match        https://ffscouter.com/supportpanel/mortgages/marketing*
 // @match        https://www.ffscouter.com/supportpanel/mortgages/marketing*
+// @match        https://ffscouter.com/supportpanel/marketing-lists*
+// @match        https://www.ffscouter.com/supportpanel/marketing-lists*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=torn.com
 // @updateURL    https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js
 // @downloadURL  https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js
@@ -257,7 +259,7 @@
 
 })();
 
-// SOLENYA ADDITIONS //
+// SOLENYA ADDITIONS // 
 (function () {
   'use strict';
 
@@ -290,7 +292,7 @@
       }
       #ffq-panel[data-min="1"] { padding: 6px 12px !important; }
       #ffq-panel[data-min="1"] > :not(.ffq-keep) { display: none !important; }
-
+      
       #ffq-panel button, .ffq-btn-modern {
         font-family: ui-sans-serif, system-ui, sans-serif !important;
         font-weight: 600 !important;
@@ -409,6 +411,10 @@
     b._fitW = b.clientWidth;
   }
 
+  // Torn's shared send timer: after money, 2 s before the next send of either kind; after a mail, 10 s
+  const cooldown = () => Math.max(0, Math.max(Number(localStorage.getItem('ffscouter_lastsend_v1') || 0) + 2000,
+                                              Number(localStorage.getItem('ffscouter_maillast_v1') || 0) + 10000) - Date.now());
+
   // one note at a time, pinned to the bottom (above PDA's bottom bar). ok: true green, false red, 'warn' yellow
   function note(text, ok) {
     const old = document.getElementById('ffq-note');
@@ -475,7 +481,8 @@
     };
     setInterval(refresh, 1000);
     refresh();
-    btn.addEventListener('click', () => { if (usable().length) window.open(url(), '_blank'); });
+    // PDA's window.open reuses your last tab without loading the queue, so PDA opens it right here
+    btn.addEventListener('click', () => { if (usable().length) isPDA ? (location.href = url()) : window.open(url(), '_blank'); });
     return refresh;
   }
 
@@ -637,7 +644,7 @@
     setInterval(() => { if (alive() && !panel.isConnected) put(); }, 500);   // Torn re-renders the page
   }
 
-  if (/(^|\.)ffscouter\.com$/.test(location.hostname)) return /\/(loss-buy-marketing|mortgages\/marketing)\/?$/.test(path) ? outreachSender() : ffscouterSender();
+  if (/(^|\.)ffscouter\.com$/.test(location.hostname)) return /\/(loss-buy-marketing|mortgages\/marketing|marketing-lists)\/?$/.test(path) ? outreachSender() : ffscouterSender();
   if (path === '/properties.php') { propertiesPage(); if (q.has('ffvault')) queuePanel(); return; }
   if (path === '/trade.php')      { if (q.has('fftrade')) queuePanel(); return; }
   if (path === '/item.php')       return itemPrefill().catch(e => console.error('[FFScouter item]', e));
@@ -726,7 +733,19 @@
     // left out of the next queue
     const KEY_MAILED = 'ffscouter_mailed_v1', MAILED_TTL = 7 * 24 * 3600 * 1000;
     const mailed = () => ledger(KEY_MAILED, MAILED_TTL);
-    inbox('ffMailed', p => remember(KEY_MAILED, MAILED_TTL, p.filter(([id]) => /^\d+$/.test(id))));
+    inbox('ffMailed', p => remember(KEY_MAILED, MAILED_TTL, p.filter(([id]) => /^x?\d+$/.test(id))));
+
+    // marketing-lists rows have no assign id: those mails are keyed 'x' + XID instead
+    const lists = /marketing-lists/.test(path);
+    const xidOf = a => { try { const u = new URL(a.href); return new URLSearchParams(u.hash.slice(u.hash.indexOf('&') + 1)).get('XID') || ''; } catch (e) { return ''; } };
+    const idOf  = a => lists ? 'x' + xidOf(a) : a.dataset.composeAssign;
+    // the "Name [XID]" text nearest the row's Compose link
+    const nameOf = a => {
+      if (!lists) return a.textContent.replace(/\s*\[\d+\]\s*$/, '').trim();
+      const re = new RegExp('(\\S+)\\s*\\[' + xidOf(a) + '\\]');
+      for (let e = a, k = 0; e && k < 8; e = e.parentElement, k++) { const m = re.exec(e.textContent); if (m) return m[1]; }
+      return '';
+    };
 
     // [XID, name, subject, html body, assign id] from a row's pre-filled Torn compose link
     const row = a => {
@@ -735,19 +754,22 @@
         if (u.hostname !== 'www.torn.com' || u.pathname !== '/messages.php') return null;
         const p = new URLSearchParams(u.hash.slice(u.hash.indexOf('&') + 1));
         const x = p.get('XID'), s = p.get('mailsubject'), b = p.get('mailbody');
-        return /^\d+$/.test(x || '') && s && b ? [x, a.textContent.replace(/\s*\[\d+\]\s*$/, '').trim(), s, b, a.dataset.composeAssign] : null;
+        return /^\d+$/.test(x || '') && s && b ? [x, nameOf(a), s, b, idOf(a)] : null;
       } catch (e) { return null; }
     };
     // claimed rows only: the "Clicked" list below has no data-compose-assign and is never queued
-    const links  = () => [...document.querySelectorAll('#outreach-rows a[data-compose-assign]')]
-      .filter(a => !a.closest('#outreach-clicked-wrap') && /^\d+$/.test(a.dataset.composeAssign));
+    const links  = () => lists
+      ? [...document.querySelectorAll('a[href*="messages.php"][href*="p=compose"]')].filter(a => /^\d+$/.test(xidOf(a)))
+      : [...document.querySelectorAll('#outreach-rows a[data-compose-assign]')]
+        .filter(a => !a.closest('#outreach-clicked-wrap') && /^\d+$/.test(a.dataset.composeAssign));
     // every listed batch is queued, minus the mails already done from this browser
     const boxOf   = a => a.closest('.border') || a.parentElement;
-    const usable  = () => { const l = mailed(); return links().filter(a => !l[a.dataset.composeAssign]).map(row).filter(Boolean); };
+    // marketing-lists shows each player twice (desktop table + mobile cards): one mail per id
+    const usable  = () => { const l = mailed(), seen = {}; return links().filter(a => !l[idOf(a)] && !seen[idOf(a)] && (seen[idOf(a)] = 1)).map(row).filter(Boolean); };
 
     function queueUrl() {
       const queue = usable();
-      const b64 = btoa(unescape(encodeURIComponent(JSON.stringify({ q: queue, b: /mortgages/.test(path) ? 'm' : '' }))));
+      const b64 = btoa(unescape(encodeURIComponent(JSON.stringify({ q: queue, b: path + location.search }))));
       // the queue rides in the #hash, which never reaches a server; the first mail's compose page opens with its recipient
       return 'https://www.torn.com/messages.php?ffmail=0#/p=compose&XID=' + queue[0][0] + '&ffm=' + encodeURIComponent(b64);
     }
@@ -757,7 +779,7 @@
       const l = mailed();
       links().forEach(a => {
         const box = boxOf(a);
-        if (!l[a.dataset.composeAssign] || box.dataset.ffMailed) return;
+        if (!l[idOf(a)] || box.dataset.ffMailed) return;
         box.dataset.ffMailed = '1';
         box.style.opacity = '0.45';
         const tag = document.createElement('span');
@@ -772,7 +794,6 @@
   function queuePanel() {
     const KEY = 'ffscouter_queue_v2', KEY_LAST = 'ffscouter_lastsend_v1';
     const KEY_SRC = 'ffscouter_cashsrc_v1', KEY_GHOST = 'ffscouter_ghosttrade_v1';
-    const SEND_GAP = 2000;
     const ARM_MS   = 30000;
 
     const load = () => {
@@ -830,7 +851,7 @@
     const paid   = s => s.d.indexOf(s.i) !== -1;
     const onPage = s => q.get('XID') === s.q[s.i][0];
     const cash   = () => { const el = document.getElementById('user-money'); return el ? Number(el.dataset.money) : NaN; };
-    const wait   = () => Math.max(0, Number(localStorage.getItem(KEY_LAST) || 0) + SEND_GAP - Date.now());
+    const wait   = cooldown;
 
     function need(s) {
       if (paid(s)) return 0;   // sidebar cash may not be updated yet
@@ -988,7 +1009,6 @@
   // ── messages.php: outreach mail queue (hit 1 send, hit 2 next mail). Torn allows one mail every 10 s ──
   function mailPanel() {
     const KEY = 'ffscouter_mailq_v1', KEY_LAST = 'ffscouter_maillast_v1', KEY_MAILED = 'ffscouter_mailed_v1';
-    const MAIL_GAP   = 10000;   // Torn's 10 s between mails: the only thing that holds SEND back
     const CONFIRM_MS = 8000;    // no answer from Torn by then: counted as sent (unconfirmed), never sent twice
     const MAILED_TTL = 7 * 24 * 3600 * 1000;
 
@@ -1004,7 +1024,7 @@
 
     // sent, failed and skipped mails all go in the ledger, so no later queue picks them up
     const mailed = () => ledger(KEY_MAILED, MAILED_TTL);
-    const markMailed = id => { if (/^\d+$/.test(id || '')) tellPanel('ffMailed', remember(KEY_MAILED, MAILED_TTL, [[id, Date.now()]])); };
+    const markMailed = id => { if (/^x?\d+$/.test(id || '')) tellPanel('ffMailed', remember(KEY_MAILED, MAILED_TTL, [[id, Date.now()]])); };
     tellPanel('ffMailed', mailed());
 
     const hp = new URLSearchParams(location.hash.indexOf('&') < 0 ? '' : location.hash.slice(location.hash.indexOf('&') + 1));
@@ -1015,7 +1035,7 @@
         const l = mailed();
         const rows = p.q.filter(r => /^\d+$/.test(r[0]) && r[2] && r[3]);
         const fresh = rows.filter(r => !l[r[4]]);
-        if (fresh.length) save({ q: fresh, i: 0, d: [], b: p.b === 'm' ? 'm' : '' });
+        if (fresh.length) save({ q: fresh, i: 0, d: [], b: /^\/supportpanel\/[\w\/-]*(\?[^#]*)?$/.test(p.b || '') ? p.b : '' });   // only a support-panel page
         else sessionStorage.removeItem(KEY);
         history.replaceState(null, '', location.pathname + location.search + '#/p=compose&XID=' + pageXID);
         const skipped = rows.length - fresh.length;
@@ -1029,7 +1049,7 @@
     const urlFor = k => '/messages.php?ffmail=' + k + '#/p=compose&XID=' + S.q[k][0];
     const sent   = () => S.d.indexOf(S.i) !== -1;
     const onPage = () => q.get('ffmail') === String(S.i) && pageXID === S.q[S.i][0];
-    const wait   = () => Math.max(0, Number(localStorage.getItem(KEY_LAST) || 0) + MAIL_GAP - Date.now());
+    const wait   = cooldown;
     const subj   = () => document.querySelector('input[name="subject"]');
     const filled = () => filledAt && subj() && subj().value === S.q[S.i][2];
 
@@ -1153,7 +1173,8 @@
     P.btnRow.append(sendBtn, skipBtn);
 
     // mails done here go back to the marketing page, which leaves them out of the next queue
-    const panelUrl = () => 'https://ffscouter.com/supportpanel/' + (S && S.b === 'm' ? 'mortgages/marketing' : 'payment-provider/loss-buy-marketing') + '#ffmailed=' +
+    const back = S.b || '/supportpanel/payment-provider/loss-buy-marketing';   // S is gone once the queue finishes
+    const panelUrl = () => 'https://ffscouter.com' + back + '#ffmailed=' +
       encodeURIComponent(Object.keys(mailed()).join(','));
     const finished = backTools(P.panel, panelUrl, 'Back to the marketing page; mails sent here are left out of the next queue', 'Mail queue finished ✓ ');
     dockPanel(P.panel, P.grip, () => S);
