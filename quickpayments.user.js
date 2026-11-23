@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FFScouter - Profile Payment Pre-fill & Mail Pre-fill
 // @namespace    https://ffscouter.com/
-// @version      5.5
+// @version      5.6
 // @description  Pre-fills profile send-money (paymentamount, paymentref) and messages.php compose (mailsubject, mailbody). Added: FFScouter payment queue with a movable, resizable panel (two-step SEND by click or hotkey, delay between payments, VAULT or ghost-trade shortfall button), item.php send pre-fill (e.g. Xanax), a property ID / market price / happiness bar, and an outreach mail queue (loss-buy-marketing to Torn compose, 10 s gap between mails).
 // @author       FFScouter / Glasnost [1844049] & Solenya [4053619]
 // @match        https://www.torn.com/profiles.php*
@@ -269,7 +269,7 @@
   const q    = new URLSearchParams(location.search);
   const path = location.pathname;
 
-  const VERSION    = '5.5';   // keep in sync with @version above
+  const VERSION    = '5.6';   // keep in sync with @version above
   const UPDATE_URL = 'https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js';   // empty = update check off
   const isPDA      = typeof window.flutter_inappwebview !== 'undefined' || /TornPDA/i.test(navigator.userAgent);
   // layout only (compact panel styles below); PDA-only behaviour still keys off isPDA
@@ -484,7 +484,9 @@
     };
     setInterval(refresh, 1000);
     refresh();
-    btn.addEventListener('click', () => { if (usable().length) window.open(url(), '_blank'); });
+    // a real link click, not window.open: PDA's window.open can reopen your last closed tab instead of the queue
+    // (the panel's own target=_blank links open fine there). No rel=noopener: the queue tab reports back via window.opener
+    btn.addEventListener('click', () => { if (!usable().length) return; const a = document.createElement('a'); a.href = url(); a.target = '_blank'; a.click(); });
     return refresh;
   }
 
