@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FFScouter - Profile Payment Pre-fill & Mail Pre-fill
 // @namespace    https://ffscouter.com/
-// @version      5.6
+// @version      5.7
 // @description  Pre-fills profile send-money (paymentamount, paymentref) and messages.php compose (mailsubject, mailbody). Added: FFScouter payment queue with a movable, resizable panel (two-step SEND by click or hotkey, delay between payments, VAULT or ghost-trade shortfall button), item.php send pre-fill (e.g. Xanax), a property ID / market price / happiness bar, and an outreach mail queue (loss-buy-marketing to Torn compose, 10 s gap between mails).
 // @author       FFScouter / Glasnost [1844049] & Solenya [4053619]
 // @match        https://www.torn.com/profiles.php*
@@ -259,7 +259,7 @@
 
 })();
 
-// SOLENYA ADDITIONS // 
+// SOLENYA ADDITIONS //
 (function () {
   'use strict';
   // PDA can inject the script twice: the second run would dock a second queue panel
@@ -269,7 +269,7 @@
   const q    = new URLSearchParams(location.search);
   const path = location.pathname;
 
-  const VERSION    = '5.6';   // keep in sync with @version above
+  const VERSION    = '5.7';   // keep in sync with @version above
   const UPDATE_URL = 'https://github.com/GlasnostDev/Torn-Quick-Payments/raw/refs/heads/main/quickpayments.user.js';   // empty = update check off
   const isPDA      = typeof window.flutter_inappwebview !== 'undefined' || /TornPDA/i.test(navigator.userAgent);
   // layout only (compact panel styles below); PDA-only behaviour still keys off isPDA
@@ -295,7 +295,7 @@
       }
       #ffq-panel[data-min="1"] { padding: 6px 12px !important; }
       #ffq-panel[data-min="1"] > :not(.ffq-keep) { display: none !important; }
-      
+
       #ffq-panel button, .ffq-btn-modern {
         font-family: ui-sans-serif, system-ui, sans-serif !important;
         font-weight: 600 !important;
@@ -414,9 +414,10 @@
     b._fitW = b.clientWidth;
   }
 
-  // Torn's shared send timer: after money, 2 s before the next send of either kind; after a mail, 10 s
-  const cooldown = () => Math.max(0, Math.max(Number(localStorage.getItem('ffscouter_lastsend_v1') || 0) + 2000,
-                                              Number(localStorage.getItem('ffscouter_maillast_v1') || 0) + 10000) - Date.now());
+  // send timers, as Torn runs them: money waits 2 s after money only; a mail waits 10 s after a mail or a money send
+  const lastMoney = () => Number(localStorage.getItem('ffscouter_lastsend_v1') || 0);
+  const moneyCooldown = () => Math.max(0, lastMoney() + 2000 - Date.now());
+  const cooldown = () => Math.max(0, Math.max(lastMoney(), Number(localStorage.getItem('ffscouter_maillast_v1') || 0)) + 10000 - Date.now());
 
   // one note at a time, pinned to the bottom (above PDA's bottom bar). ok: true green, false red, 'warn' yellow
   function note(text, ok) {
@@ -508,10 +509,57 @@
   // a queue panel docked inside the page like a native Torn block: grip, info line, button row, hotkey picker, ✕.
   // The hotkey runs step(); typing in a field never triggers it (typeKeysOnly: only keys that type a character are
   // left alone there, so an arrow key still works while Torn's To field has focus)
-  function makePanel(step, stop, typeKeysOnly) {
-    const KEY_HK = 'ffscouter_hotkey_v1';
-    const getKey = () => localStorage.getItem(KEY_HK) || 'ArrowRight';
-    let held = false, capturing = false;
+  function makePanel(step, stop, typeKeysOnly, skip) {
+    // one hotkey: its "name: key" picker button and its keydown/keyup handlers. A key works one action only:
+    // picking a key the other hotkey has is refused, and a default the other one already uses stays unset.
+    // capturing is shared, so the key pressed while picking never runs either action
+    let capturing = false;
+    const keys = [];
+    function hotkey(KEY_HK, def, name, run, typeKeysOnly) {
+      const stored = () => localStorage.getItem(KEY_HK);
+      const getKey = () => stored() || (keys.some(k => k.keyBtn !== keyBtn && k.stored() === def) ? '' : def);
+      let held = false, picking = false;
+      const keyLabel = () => { keyBtn.textContent = picking ? name + '…' : name + ': ' + (keyName(getKey()) || 'none'); };
+      const keyBtn = button('#334155', () => {
+        if (capturing) return;
+        capturing = picking = true;
+        keyLabel();
+        document.addEventListener('keydown', function pick(e) {
+          if (/^(Shift|Control|Alt|Meta)$/.test(e.key)) return;
+          e.preventDefault();
+          e.stopPropagation();
+          document.removeEventListener('keydown', pick, true);
+          const clash = e.key !== 'Escape' && keys.some(k => k.keyBtn !== keyBtn && k.getKey() === e.code);
+          if (clash) note(keyName(e.code) + ' is already the other hotkey - pick a different key.', false);
+          else if (e.key !== 'Escape') localStorage.setItem(KEY_HK, e.code);
+          held = e.key !== 'Escape';
+          capturing = picking = false;
+          keyLabel();
+        }, true);
+      });
+      if (isPDA) keyBtn.style.setProperty('display', 'none', 'important');   // no keyboard shortcuts on PDA (beats the compact CSS)
+      keyBtn.title = 'Click, then press the key you want for the queue button';
+      keyLabel();
+      keyBtn.style.cssText += ';font-size:11px;padding:4px 8px;height:34px;border-radius:6px';
+      keyBtn.className = 'ffq-keep';
+      const down = e => {
+        if (capturing || e.code !== getKey()) return;
+        if (e.repeat || held) return;   // a held key never repeats
+        held = true;
+        const a = (e.target.ownerDocument || document).activeElement || {};
+        if (!e.isTrusted || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+        if ((!typeKeysOnly || e.key.length === 1) && (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || a.isContentEditable)) return;
+        e.preventDefault();
+        run();
+      };
+      const up = e => { if (e.code === getKey()) held = false; };
+      window.addEventListener('blur', () => { held = false; });
+      return { keyBtn, down, up, stored, getKey };
+    }
+    // the Skip key never fires inside a field or the mail editor, so a stray arrow there cannot skip a mail
+    keys.push(hotkey('ffscouter_hotkey_v1', 'ArrowRight', 'Key', step, typeKeysOnly));
+    if (skip) keys.push(hotkey('ffscouter_skipkey_v1', 'ArrowLeft', 'Skip key', skip, false));
+    const keyBtn = keys[0].keyBtn;
 
     const panel = document.createElement('div');
     panel.id = 'ffq-panel';
@@ -523,29 +571,10 @@
       ? 'font-size:12px;font-weight:600;color:#f3f4f6;flex:1 1 auto;min-width:0;margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
       : 'flex:1 1 auto;font-size:12px;font-weight:600;color:#f3f4f6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
     const btnRow = flexRow();
-    const keyLabel = () => { keyBtn.textContent = capturing ? 'Key…' : 'Key: ' + keyName(getKey()); };
-    const keyBtn = button('#334155', () => {
-      capturing = true;
-      keyLabel();
-      document.addEventListener('keydown', function pick(e) {
-        if (/^(Shift|Control|Alt|Meta)$/.test(e.key)) return;
-        e.preventDefault();
-        e.stopPropagation();
-        document.removeEventListener('keydown', pick, true);
-        if (e.key !== 'Escape') localStorage.setItem(KEY_HK, e.code);
-        held = e.key !== 'Escape';
-        capturing = false;
-        keyLabel();
-      }, true);
-    });
-    if (isPDA) keyBtn.style.setProperty('display', 'none', 'important');   // no keyboard shortcuts on PDA (beats the compact CSS)
-    keyBtn.title = 'Click, then press the key you want for the queue button';
-    keyLabel();
-    keyBtn.style.cssText += ';font-size:11px;padding:4px 8px;height:34px;border-radius:6px';
     const stopBtn = button('#b91c1c', () => { stop(); panel.remove(); });
     stopBtn.textContent = '✕';
     stopBtn.style.cssText += ';font-size:11px;padding:4px 8px;height:34px;border-radius:6px';
-    grip.className = info.className = stopBtn.className = keyBtn.className = 'ffq-keep';
+    grip.className = info.className = stopBtn.className = 'ffq-keep';
     if (isMobile) {
       // narrow screens: grip, info and ✕ on a top bar, the buttons stacked below
       const topBar = document.createElement('div');
@@ -553,25 +582,14 @@
       topBar.className = 'ffq-keep';
       topBar.dataset.ffqTopbar = '1';
       topBar.append(grip, info, stopBtn);
-      panel.append(topBar, btnRow, keyBtn);
-    } else panel.append(grip, info, btnRow, keyBtn, stopBtn);
+      panel.append(topBar, btnRow, ...keys.map(k => k.keyBtn));
+    } else panel.append(grip, info, btnRow, ...keys.map(k => k.keyBtn), stopBtn);
 
-    function onKey(e) {
-      if (capturing || e.code !== getKey()) return;
-      if (e.repeat || held) return;   // a held key never repeats
-      held = true;
-      const a = (e.target.ownerDocument || document).activeElement || {};
-      if (!e.isTrusted || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
-      if ((!typeKeysOnly || e.key.length === 1) && (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || a.isContentEditable)) return;
-      e.preventDefault();
-      step();
-    }
-    const listen = doc => {
-      doc.addEventListener('keydown', onKey, true);
-      doc.addEventListener('keyup', e => { if (e.code === getKey()) held = false; }, true);
-    };
+    const listen = doc => keys.forEach(k => {
+      doc.addEventListener('keydown', k.down, true);
+      doc.addEventListener('keyup', k.up, true);
+    });
     listen(document);
-    window.addEventListener('blur', () => { held = false; });
     return { panel, grip, info, btnRow, keyBtn, listen };
   }
 
@@ -586,6 +604,9 @@
       a.style.cssText = 'color:#fff;background:#334155;text-decoration:none;font:600 12px ui-sans-serif,sans-serif;padding:4px 8px;' + css;
       a.addEventListener('click', e => {
         a.href = panelUrl();
+        // PDA: only close this tab, never turn it into the panel. Safe: this browser's own sent/mailed lists
+        // leave already-done players out of the next queue even if the panel never hears about them
+        if (isPDA) { e.preventDefault(); closeTab(panelUrl()); return; }
         if (window.opener && !window.opener.closed) { e.preventDefault(); closeTab(panelUrl(), () => { location.href = panelUrl(); }); }
       });
       a.href = panelUrl();
@@ -614,7 +635,7 @@
       if (window.opener && !window.opener.closed) {
         if (isPDA) window.opener.location.href = panelUrl;
         window.close();
-      }
+      } else if (isPDA) window.close();   // PDA closes the tab itself (about 2 s later), opener or not
     } catch (e) {}
     if (fallback) setTimeout(() => { if (!window.closed) fallback(); }, 500);
   }
@@ -855,7 +876,7 @@
     const paid   = s => s.d.indexOf(s.i) !== -1;
     const onPage = s => q.get('XID') === s.q[s.i][0];
     const cash   = () => { const el = document.getElementById('user-money'); return el ? Number(el.dataset.money) : NaN; };
-    const wait   = cooldown;
+    const wait   = moneyCooldown;
 
     function need(s) {
       if (paid(s)) return 0;   // sidebar cash may not be updated yet
@@ -937,7 +958,9 @@
         .then(() => { localStorage.setItem(KEY_LAST, Date.now()); sending = false; show(); });
     }
 
-    const P = makePanel(step, () => { localStorage.removeItem(KEY); S = null; }, false);
+    // the Skip key presses Next ▶ (Open ▶ when off the player): moves on without paying
+    function skipNext() { if (S && !sending) onPage(S) ? next() : (location.href = urlFor(S, S.i)); }
+    const P = makePanel(step, () => { localStorage.removeItem(KEY); S = null; }, false, skipNext);
     P.keyBtn.title = 'Click, then press the key you want for SEND / CONFIRM / NEXT';
     const sendBtn  = button('#059669', step);
     if (isMobile) sendBtn.classList.add('ffq-send-main');
@@ -955,7 +978,7 @@
     });
     releaseBtn.textContent = 'Rel';
     releaseBtn.title = 'Releases this job on the FFScouter support panel and skips it';
-    const nextBtn  = button('#0284c7', () => onPage(S) ? next() : (location.href = urlFor(S, S.i)));
+    const nextBtn  = button('#0284c7', skipNext);
     if (isMobile) {
       [[sendBtn, '1 1 100%'], [nextBtn, '1 1 48%'], [releaseBtn, '0 0 20%'], [vaultBtn, '1 1 48%'], [srcBtn, '1 1 48%']].forEach(([b, f]) => {
         b.style.cssText += ';box-sizing:border-box;flex:' + f + ';min-width:0;text-align:center';
@@ -1163,7 +1186,7 @@
       show();
     }
 
-    const P = makePanel(step, () => { sessionStorage.removeItem(KEY); S = null; }, true);
+    const P = makePanel(step, () => { sessionStorage.removeItem(KEY); S = null; }, true, skip);
     const sendBtn = button('#059669', step);
     if (isMobile) sendBtn.classList.add('ffq-send-main');
     const skipBtn = button('#334155', skip);
